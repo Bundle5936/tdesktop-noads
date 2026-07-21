@@ -1,0 +1,22 @@
+--- a/Telegram/SourceFiles/main/main_session.cpp
++++ b/Telegram/SourceFiles/main/main_session.cpp
+@@ -343,7 +343,7 @@
+ }
+ 
+ bool Session::premium() const {
+-	return _user->isPremium();
++	return true; // localPremium: client-side only
+ }
+ 
+ bool Session::premiumPossible() const {
+--- a/Telegram/SourceFiles/data/data_peer_values.cpp
++++ b/Telegram/SourceFiles/data/data_peer_values.cpp
+@@ -404,7 +404,7 @@
+ }
+ 
+ rpl::producer<bool> AmPremiumValue(not_null<Main::Session*> session) {
+-	return PeerPremiumValue(session->user());
++	return rpl::single(true); // localPremium: client-side only
+ }
+ 
+ TimeId SortByOnlineValue(not_null<UserData*> user, TimeId now) {

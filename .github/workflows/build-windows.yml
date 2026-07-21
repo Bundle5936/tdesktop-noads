@@ -110,16 +110,17 @@ jobs:
           submodules: recursive
           path: ${{ env.TBUILD }}/tdesktop
 
-      - name: Apply no-ads patch
+      - name: Apply patches (no-ads + localPremium)
         shell: bash
         run: |
           set -euo pipefail
-          python "$GITHUB_WORKSPACE/noads/scripts/apply_noads_patch.py" \
+          python "$GITHUB_WORKSPACE/noads/scripts/apply_patches.py" \
             --src "$TBUILD/tdesktop" \
-            --patch "$GITHUB_WORKSPACE/noads/patches/0001-no-sponsored-messages.patch" \
+            --patches-dir "$GITHUB_WORKSPACE/noads/patches" \
             --cli "$GITHUB_WORKSPACE/noads/cli/tdesktop_noads.py" \
             --heal-on-fail
-          grep -n "return false" "$TBUILD/tdesktop/Telegram/SourceFiles/data/components/sponsored_messages.cpp" | head
+          echo "--- sponsored ---"; grep -n "return false" "$TBUILD/tdesktop/Telegram/SourceFiles/data/components/sponsored_messages.cpp" | head || true
+          echo "--- premium ---"; grep -n "localPremium" "$TBUILD/tdesktop/Telegram/SourceFiles/main/main_session.cpp" "$TBUILD/tdesktop/Telegram/SourceFiles/data/data_peer_values.cpp" || true
 
       - name: First set up
         shell: bash
@@ -243,7 +244,9 @@ jobs:
           tdesktop-noads portable (Windows x64)
           =====================================
           Upstream: ${{ steps.meta.outputs.tag }}
-          Patch: disable Sponsored Messages (client-side)
+          Patches:
+            - disable Sponsored Messages (client-side)
+            - localPremium UI spoof (client-side only)
           API credentials source: ${{ steps.meta.outputs.api_source }}
 
           Usage:
@@ -253,7 +256,7 @@ jobs:
 
           Notes:
             - Not an official Telegram build
-            - Not Premium; only hides sponsored messages in this client
+            - localPremium does NOT unlock server-verified Premium features
             - Prefer your own api_id/api_hash via repo Secrets
           EOF
 
@@ -285,7 +288,7 @@ jobs:
 
             - Upstream: https://github.com/telegramdesktop/tdesktop/releases/tag/${{ steps.meta.outputs.tag }}
             - Windows portable: `tportable-x64-noads-${{ steps.meta.outputs.ver }}.zip`
-            - Patch: disable Sponsored Messages (client-side)
+            - Patches: no-ads + localPremium (client-side)
             - API: `${{ steps.meta.outputs.api_source }}`
 
             Extract → run `Telegram.exe`. Data in `tdata/`.

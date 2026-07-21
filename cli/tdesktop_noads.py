@@ -23,11 +23,14 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PATCH = REPO_ROOT / "patches" / "0001-no-sponsored-messages.patch"
+DEFAULT_PATCHES_DIR = REPO_ROOT / "patches"
 DEFAULT_WORK = REPO_ROOT / "work"
 DEFAULT_PIN = REPO_ROOT / "versions" / "current.json"
 UPSTREAM = "telegramdesktop/tdesktop"
 SPONSORED_REL = Path("Telegram/SourceFiles/data/components/sponsored_messages.cpp")
-USER_AGENT = "tdesktop-noads-cli/0.3 (+https://github.com/vcshixin/tdesktop-noads)"
+MAIN_SESSION_REL = Path("Telegram/SourceFiles/main/main_session.cpp")
+PEER_VALUES_REL = Path("Telegram/SourceFiles/data/data_peer_values.cpp")
+USER_AGENT = "tdesktop-noads-cli/0.4 (+https://github.com/vcshixin/tdesktop-noads)"
 
 
 class CliError(RuntimeError):
@@ -310,49 +313,205 @@ def generate_unified_patch(original: str, patched: str, relpath: str) -> str:
 
 
 def auto_heal_patch(src: Path, patch_path: Path) -> str:
-    """Rewrite sponsored_messages.cpp entry points and regenerate patch file."""
+    """Rewrite sponsored_messages.cpp entry points and regenerate no-ads patch."""
     target = src / SPONSORED_REL
     if not target.is_file():
         raise CliError(f"missing {SPONSORED_REL} under {src}")
 
     original = target.read_text(encoding="utf-8", errors="replace")
-    # normalize to LF for stable patch generation
     original_lf = original.replace("\r\n", "\n")
     healed, done = heal_sponsored_source(original_lf)
-    log("auto-heal rewrote:")
+    log("auto-heal no-ads rewrote:")
     for s in done:
         log(f"  - {s}")
 
-    rel = SPONSORED_REL.as_posix()
-    patch_text = generate_unified_patch(original_lf, healed, rel)
+    patch_text = generate_unified_patch(original_lf, healed, SPONSORED_REL.as_posix())
     patch_path.parent.mkdir(parents=True, exist_ok=True)
     patch_path.write_text(patch_text, encoding="utf-8", newline="\n")
     log(f"regenerated patch: {patch_path}")
 
-    # Verify regenerated patch applies cleanly on a fresh copy of original
-    # (file on disk is still original)
     target.write_text(original_lf, encoding="utf-8", newline="\n")
     apply_patch(src, patch_path, check_only=True)
     return patch_text
 
 
+def heal_local_premium_sources(main_session: str, peer_values: str) -> tuple[str, str, list[str]]:
+    """Client-side localPremium: force Session::premium and AmPremiumValue."""
+    done: list[str] = []
+
+    old_prem = (
+        "bool Session::premium() const {\n"
+        "\treturn _user->isPremium();\n"
+        "}"
+    )
+    new_prem = (
+        "bool Session::premium() const {\n"
+        "\treturn true; // localPremium: client-side only\n"
+        "}"
+    )
+    if old_prem in main_session:
+        main_session = main_session.replace(old_prem, new_prem, 1)
+        done.append("Session::premium")
+    else:
+        # tolerate formatting drift: replace whole function body with return true
+        sig = "bool Session::premium() const"
+        tmp, ok = _replace_function_body(main_session, sig)
+        if not ok:
+            raise CliError("auto-heal could not locate Session::premium()")
+        main_session = tmp.replace(
+            f"{sig} {{\n\treturn false;\n}}",
+            new_prem,
+            1,
+        )
+        if "bool Session::premium() const" in main_session and "return true" not in main_session[
+            main_session.find("bool Session::premium() const") : main_session.find(
+                "bool Session::premium() const"
+            )
+            + 120
+        ]:
+            # force insert new_prem by brace matching again
+            pat = re.compile(re.escape(sig) + r"[ \t]*\{", re.MULTILINE)
+            m = pat.search(main_session)
+            if not m:
+                raise CliError("Session::premium signature missing after rewrite")
+            start = m.start()
+            i = m.end() - 1
+            depth = 0
+            end = None
+            while i < len(main_session):
+                if main_session[i] == "{":
+                    depth += 1
+                elif main_session[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1
+                        break
+                i += 1
+            if end is None:
+                raise CliError("Session::premium brace match failed")
+            main_session = main_session[:start] + new_prem + main_session[end:]
+        done.append("Session::premium")
+
+    old_am = (
+        "rpl::producer<bool> AmPremiumValue(not_null<Main::Session*> session) {\n"
+        "\treturn PeerPremiumValue(session->user());\n"
+        "}"
+    )
+    new_am = (
+        "rpl::producer<bool> AmPremiumValue(not_null<Main::Session*> session) {\n"
+        "\treturn rpl::single(true); // localPremium: client-side only\n"
+        "}"
+    )
+    if old_am in peer_values:
+        peer_values = peer_values.replace(old_am, new_am, 1)
+        done.append("AmPremiumValue")
+    else:
+        sig = "rpl::producer<bool> AmPremiumValue(not_null<Main::Session*> session)"
+        pat = re.compile(re.escape(sig) + r"[ \t]*\{", re.MULTILINE)
+        m = pat.search(peer_values)
+        if not m:
+            raise CliError("auto-heal could not locate AmPremiumValue()")
+        start = m.start()
+        i = m.end() - 1
+        depth = 0
+        end = None
+        while i < len(peer_values):
+            if peer_values[i] == "{":
+                depth += 1
+            elif peer_values[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+            i += 1
+        if end is None:
+            raise CliError("AmPremiumValue brace match failed")
+        peer_values = peer_values[:start] + new_am + peer_values[end:]
+        done.append("AmPremiumValue")
+
+    return main_session, peer_values, done
+
+
+def auto_heal_local_premium_patch(src: Path, patch_path: Path) -> str:
+    """Regenerate local-premium patch from current upstream sources."""
+    f1 = src / MAIN_SESSION_REL
+    f2 = src / PEER_VALUES_REL
+    if not f1.is_file() or not f2.is_file():
+        raise CliError("missing main_session.cpp or data_peer_values.cpp")
+
+    o1 = f1.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
+    o2 = f2.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
+    n1, n2, done = heal_local_premium_sources(o1, o2)
+    log("auto-heal localPremium rewrote:")
+    for s in done:
+        log(f"  - {s}")
+
+    patch_text = generate_unified_patch(o1, n1, MAIN_SESSION_REL.as_posix())
+    patch_text += generate_unified_patch(o2, n2, PEER_VALUES_REL.as_posix())
+    patch_path.parent.mkdir(parents=True, exist_ok=True)
+    patch_path.write_text(patch_text, encoding="utf-8", newline="\n")
+    log(f"regenerated patch: {patch_path}")
+
+    f1.write_text(o1, encoding="utf-8", newline="\n")
+    f2.write_text(o2, encoding="utf-8", newline="\n")
+    apply_patch(src, patch_path, check_only=True)
+    return patch_text
+
+
+def auto_heal_named_patch(src: Path, patch_path: Path) -> str:
+    name = patch_path.name.lower()
+    if "sponsored" in name or name.startswith("0001"):
+        return auto_heal_patch(src, patch_path)
+    if "premium" in name or name.startswith("0002"):
+        return auto_heal_local_premium_patch(src, patch_path)
+    raise CliError(f"no auto-heal strategy for {patch_path.name}")
+
+
+def list_default_patches() -> list[Path]:
+    return sorted(DEFAULT_PATCHES_DIR.glob("*.patch"))
+
+
+def apply_all_patches(
+    src: Path,
+    patches: list[Path] | None = None,
+    *,
+    check_only: bool = False,
+    heal: bool = False,
+) -> bool:
+    """Apply every patch. Returns True if any patch was healed/regenerated."""
+    patches = patches or list_default_patches()
+    if not patches:
+        raise CliError("no patches found")
+    healed_any = False
+    for patch in patches:
+        try:
+            apply_patch(src, patch, check_only=check_only)
+        except CliError:
+            if not heal:
+                raise
+            log(f"heal then re-apply: {patch.name}")
+            auto_heal_named_patch(src, patch)
+            apply_patch(src, patch, check_only=check_only)
+            healed_any = True
+    return healed_any
+
+
 def write_release_notes(path: Path, release: dict, tag: str, *, healed: bool) -> None:
     body = release.get("body") or ""
-    mode = "auto-healed and regenerated" if healed else "existing patch applies"
+    mode = "auto-healed and regenerated" if healed else "existing patches apply"
+    patches = ", ".join(p.name for p in list_default_patches()) or "(none)"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         f"## Upstream {tag}\n\n"
         f"- Official: {release.get('html_url')}\n"
         f"- Published: {release.get('published_at')}\n"
-        f"- Patch: `patches/0001-no-sponsored-messages.patch` — **{mode}**\n\n"
+        f"- Patches: `{patches}` — **{mode}**\n\n"
+        f"### Features\n\n"
+        f"- No Sponsored Messages (client-side)\n"
+        f"- Local Premium (client-side UI spoof; server-gated features still need real Premium)\n\n"
         f"### Official changelog\n\n{body}\n\n"
-        f"### This repo\n\n"
-        f"Pure GitHub auto-follow of official Telegram Desktop.\n"
-        f"Only disables Sponsored Messages (client-side).\n"
-        f"No Windows binary is built by CI.\n\n"
-        f"```bash\n"
-        f"python cli/tdesktop_noads.py prepare --tag {tag}\n"
-        f"```\n",
+        f"### Portable build\n\n"
+        f"Windows x64 portable zip is produced by `build-windows` workflow and attached here.\n",
         encoding="utf-8",
     )
 
@@ -407,9 +566,11 @@ def cmd_apply(args: argparse.Namespace) -> int:
 def cmd_prepare(args: argparse.Namespace) -> int:
     tag = normalize_tag(args.tag)
     work = Path(args.work).resolve()
-    patch = Path(args.patch).resolve() if args.patch else DEFAULT_PATCH
     src = fetch_source(tag, work, keep_archive=not args.no_keep_archive)
-    apply_patch(src, patch, check_only=False)
+    if args.patch:
+        apply_patch(src, Path(args.patch).resolve(), check_only=False)
+    else:
+        apply_all_patches(src, heal=False)
     log(f"prepare done: {tag} -> {src}")
     return 0
 
@@ -417,24 +578,31 @@ def cmd_prepare(args: argparse.Namespace) -> int:
 def cmd_check(args: argparse.Namespace) -> int:
     tag = normalize_tag(args.tag)
     work = Path(args.work).resolve()
-    patch = Path(args.patch).resolve() if args.patch else DEFAULT_PATCH
     src = fetch_source(tag, work, keep_archive=not args.no_keep_archive)
-    apply_patch(src, patch, check_only=True)
-    if not args.dry_run_only:
-        apply_patch(src, patch, check_only=False)
-    log(f"OK: patch applies on {tag}")
+    if args.patch:
+        apply_patch(src, Path(args.patch).resolve(), check_only=True)
+        if not args.dry_run_only:
+            apply_patch(src, Path(args.patch).resolve(), check_only=False)
+    else:
+        apply_all_patches(src, check_only=True, heal=False)
+        if not args.dry_run_only:
+            apply_all_patches(src, check_only=False, heal=False)
+    log(f"OK: patches apply on {tag}")
     github_output("patch_ok", "true")
     github_output("tag", tag)
     return 0
 
 
 def cmd_heal(args: argparse.Namespace) -> int:
-    """Regenerate patch against a tag (CI / recovery)."""
+    """Regenerate patch(es) against a tag (CI / recovery)."""
     tag = normalize_tag(args.tag)
     work = Path(args.work).resolve()
-    patch = Path(args.patch).resolve() if args.patch else DEFAULT_PATCH
     src = fetch_source(tag, work, keep_archive=not args.no_keep_archive)
-    auto_heal_patch(src, patch)
+    if args.patch:
+        auto_heal_named_patch(src, Path(args.patch).resolve())
+    else:
+        for patch in list_default_patches():
+            auto_heal_named_patch(src, patch)
     log(f"heal done for {tag}")
     return 0
 
@@ -446,6 +614,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     latest = normalize_tag(None)
     current = pin.get("tag")
     work_tag = work_pin.read_text(encoding="utf-8").strip() if work_pin.is_file() else None
+    patches = [rel_to_repo(p) for p in list_default_patches()]
     print(
         json.dumps(
             {
@@ -454,8 +623,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                 "work_pin": work_tag,
                 "up_to_date": current == latest if current else False,
                 "source_exists": (work / "src").is_dir(),
-                "patch": rel_to_repo(DEFAULT_PATCH),
-                "patch_exists": DEFAULT_PATCH.is_file(),
+                "patches": patches,
                 "patch_status": pin.get("patch_status"),
                 "work": str(work),
             },
@@ -467,11 +635,15 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_follow(args: argparse.Namespace) -> int:
-    """Pure-CI entry: follow official release, apply or auto-heal patch, update pin."""
+    """Pure-CI entry: follow official release, apply/heal all patches, update pin."""
     pin_path = Path(args.pin).resolve() if args.pin else DEFAULT_PIN
     pin = load_pin(pin_path)
-    patch = Path(args.patch).resolve() if args.patch else DEFAULT_PATCH
     work = Path(args.work).resolve()
+    patches = (
+        [Path(args.patch).resolve()]
+        if args.patch
+        else list_default_patches()
+    )
 
     release = upstream_release(args.tag)
     tag = normalize_tag(release["tag_name"])
@@ -497,27 +669,20 @@ def cmd_follow(args: argparse.Namespace) -> int:
     log(f"follow: {pinned or '(none)'} -> {tag}")
     github_output("skipped", "false")
     healed = False
-    heal_note = "existing patch applies"
+    heal_note = "existing patches apply"
 
     try:
         src = fetch_source(tag, work, keep_archive=not args.no_keep_archive)
-        try:
-            apply_patch(src, patch, check_only=True)
-        except CliError as apply_err:
-            if not args.auto_heal:
-                raise
-            log(f"patch apply failed, auto-heal: {apply_err}")
-            auto_heal_patch(src, patch)
-            healed = True
-            heal_note = "auto-healed (patch regenerated)"
-
+        healed = apply_all_patches(
+            src,
+            patches,
+            check_only=True,
+            heal=bool(args.auto_heal),
+        )
+        if healed:
+            heal_note = "auto-healed (one or more patches regenerated)"
         if not args.dry_run_only:
-            # re-fetch clean tree if we only checked, or apply after heal
-            if healed:
-                # auto_heal left original on disk and verified check; apply for real if needed
-                apply_patch(src, patch, check_only=False)
-            else:
-                apply_patch(src, patch, check_only=False)
+            apply_all_patches(src, patches, check_only=False, heal=False)
     except CliError as e:
         fail = {
             "tag": tag,
@@ -526,6 +691,7 @@ def cmd_follow(args: argparse.Namespace) -> int:
             "html_url": release.get("html_url"),
             "checked_at": utc_now(),
             "auto_heal": bool(args.auto_heal),
+            "patches": [p.name for p in patches],
         }
         write_failure(work / "follow-failure.json", fail)
         github_output("changed", "false")
@@ -541,7 +707,7 @@ def cmd_follow(args: argparse.Namespace) -> int:
         "checked_at": utc_now(),
         "published_at": release.get("published_at"),
         "html_url": release.get("html_url"),
-        "patch": rel_to_repo(patch),
+        "patches": [rel_to_repo(p) for p in patches],
         "patch_status": "ok",
         "healed": healed,
         "notes": f"Auto-followed {tag}; {heal_note}.",
