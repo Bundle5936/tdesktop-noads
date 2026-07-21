@@ -1,0 +1,8 @@
+{
+  "upstream_repo": "telegramdesktop/tdesktop",
+  "tag": "v7.0.3",
+  "checked_at": "2026-07-18T09:00:15Z",
+  "patch": "patches/0001-no-sponsored-messages.patch",
+  "patch_status": "ok",
+  "notes": "Initial pin. Patch verified against v7.0.3 sponsored_messages.cpp."
+}

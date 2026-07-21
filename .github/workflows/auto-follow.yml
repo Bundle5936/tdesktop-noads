@@ -1,0 +1,227 @@
+# Pure GitHub auto-follow — zero local participation.
+#
+# Every 6 hours (and on manual run):
+#   1. Read official telegramdesktop/tdesktop latest release
+#   2. If already pinned -> stop
+#   3. Download official source, try existing patch
+#   4. If patch fails -> auto-heal (rewrite 3 entry points + regenerate patch)
+#   5. Success -> commit versions/current.json + patch, tag, GitHub Release
+#   6. Heal also fails -> open Issue only (last resort)
+#
+# No Windows binary build. Tracking + validated patch only.
+
+name: auto-follow
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream tag (empty = latest)"
+        required: false
+        default: ""
+      force:
+        description: "Re-check even if already pinned"
+        type: boolean
+        required: false
+        default: false
+  repository_dispatch:
+    types: [upstream-release]
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: auto-follow
+  cancel-in-progress: false
+
+jobs:
+  follow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Follow upstream (auto-heal)
+        id: follow
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARGS=(follow --auto-heal --dry-run-only --no-keep-archive)
+          INPUT_TAG="${{ github.event.inputs.tag || github.event.client_payload.tag || '' }}"
+          INPUT_FORCE="${{ github.event.inputs.force || 'false' }}"
+          if [[ -n "$INPUT_TAG" ]]; then
+            ARGS+=(--tag "$INPUT_TAG")
+          fi
+          if [[ "$INPUT_FORCE" == "true" ]]; then
+            ARGS+=(--force)
+          fi
+          set +e
+          python cli/tdesktop_noads.py "${ARGS[@]}"
+          CODE=$?
+          set -e
+          echo "follow_exit=$CODE" >> "$GITHUB_OUTPUT"
+          # ensure defaults if CLI did not write them
+          if ! grep -q '^tag=' "$GITHUB_OUTPUT" 2>/dev/null; then
+            echo "tag=" >> "$GITHUB_OUTPUT"
+          fi
+          if [[ "$CODE" -eq 0 ]]; then
+            exit 0
+          fi
+          if [[ "$CODE" -eq 2 ]]; then
+            echo "patch_ok=false" >> "$GITHUB_OUTPUT"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "healed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          exit "$CODE"
+
+      - name: Show state
+        shell: bash
+        run: |
+          echo "tag=${{ steps.follow.outputs.tag }}"
+          echo "skipped=${{ steps.follow.outputs.skipped }}"
+          echo "changed=${{ steps.follow.outputs.changed }}"
+          echo "patch_ok=${{ steps.follow.outputs.patch_ok }}"
+          echo "healed=${{ steps.follow.outputs.healed }}"
+          echo "exit=${{ steps.follow.outputs.follow_exit }}"
+          echo "----- versions/current.json -----"
+          cat versions/current.json || true
+          echo "----- patch head -----"
+          head -n 40 patches/0001-no-sponsored-messages.patch || true
+
+      - name: Commit pin + patch
+        id: commit
+        if: steps.follow.outputs.changed == 'true' && steps.follow.outputs.patch_ok == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.follow.outputs.tag }}"
+          HEALED="${{ steps.follow.outputs.healed }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add versions/current.json patches/0001-no-sponsored-messages.patch
+          if git diff --cached --quiet; then
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+            echo "No changes to commit"
+            exit 0
+          fi
+
+          if [[ "$HEALED" == "true" ]]; then
+            MSG="chore: follow upstream ${TAG} (auto-healed patch)"
+          else
+            MSG="chore: follow upstream ${TAG}"
+          fi
+          git commit -m "$MSG"
+
+          if git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "tag ${TAG} already exists"
+          else
+            git tag -a "${TAG}" -m "Tracked upstream ${TAG} (no-ads patch OK)"
+          fi
+
+          git push origin HEAD
+          git push origin "refs/tags/${TAG}" || true
+          echo "committed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        if: >-
+          steps.follow.outputs.changed == 'true' &&
+          steps.follow.outputs.patch_ok == 'true' &&
+          steps.commit.outputs.committed == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.follow.outputs.tag }}
+          name: ${{ steps.follow.outputs.tag }} (no-ads patch OK)
+          body_path: work/release-notes.md
+          files: |
+            patches/0001-no-sponsored-messages.patch
+            versions/current.json
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Open issue only if heal also failed
+        if: steps.follow.outputs.patch_ok == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const tag = '${{ steps.follow.outputs.tag }}';
+            const title = `Auto-follow failed on upstream ${tag}`;
+            let details = '(no follow-failure.json)';
+            try {
+              details = fs.readFileSync('work/follow-failure.json', 'utf8');
+            } catch (e) {}
+            const body = [
+              '## Auto-follow + auto-heal failed',
+              '',
+              `Upstream **${tag}** could not be tracked automatically.`,
+              'This is rare: usually the patch either applies or is regenerated.',
+              '',
+              '### Report',
+              '```json',
+              details,
+              '```',
+              '',
+              `Official: https://github.com/telegramdesktop/tdesktop/releases/tag/${tag}`,
+              '',
+              '### Manual recovery (optional)',
+              'Re-run workflow **auto-follow** with the tag and `force=true` after inspecting',
+              '`Telegram/SourceFiles/data/components/sponsored_messages.cpp` structure changes.',
+            ].join('\n');
+
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'patch-broken',
+              per_page: 20,
+            });
+            const existing = issues.data.find(i => i.title.includes(tag));
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: `Still failing.\n\n${body}`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['patch-broken', 'auto-follow'],
+              });
+            }
+            core.setFailed(`Could not track upstream ${tag}`);
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## auto-follow (pure GitHub)"
+            echo ""
+            echo "| field | value |"
+            echo "|------|-------|"
+            echo "| tag | \`${{ steps.follow.outputs.tag }}\` |"
+            echo "| skipped | ${{ steps.follow.outputs.skipped }} |"
+            echo "| changed | ${{ steps.follow.outputs.changed }} |"
+            echo "| patch_ok | ${{ steps.follow.outputs.patch_ok }} |"
+            echo "| healed | ${{ steps.follow.outputs.healed }} |"
+            echo "| job | **${{ job.status }}** |"
+          } >> "$GITHUB_STEP_SUMMARY"
