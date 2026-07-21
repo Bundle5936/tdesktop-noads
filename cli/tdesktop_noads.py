@@ -30,7 +30,8 @@ UPSTREAM = "telegramdesktop/tdesktop"
 SPONSORED_REL = Path("Telegram/SourceFiles/data/components/sponsored_messages.cpp")
 MAIN_SESSION_REL = Path("Telegram/SourceFiles/main/main_session.cpp")
 PEER_VALUES_REL = Path("Telegram/SourceFiles/data/data_peer_values.cpp")
-USER_AGENT = "tdesktop-noads-cli/0.4 (+https://github.com/vcshixin/tdesktop-noads)"
+EXPERIMENTAL_REL = Path("Telegram/SourceFiles/settings/settings_experimental.cpp")
+USER_AGENT = "tdesktop-noads-cli/0.5 (+https://github.com/vcshixin/tdesktop-noads)"
 
 
 class CliError(RuntimeError):
@@ -268,32 +269,70 @@ def _replace_function_body(src: str, signature: str) -> tuple[str, bool]:
     return src[:start] + replacement + src[end:], True
 
 
+def _ensure_include(src: str, include_line: str) -> str:
+    if include_line in src:
+        return src
+    m = re.search(r'#include "base/[^"]+"\n', src)
+    if m:
+        return src[: m.end()] + include_line + src[m.end() :]
+    m = re.search(r'#include "[^"]+"\n', src)
+    if m:
+        return src[: m.end()] + include_line + src[m.end() :]
+    return include_line + src
+
+
 def heal_sponsored_source(cpp_text: str) -> tuple[str, list[str]]:
-    """Force no-ads by short-circuiting the three entry points."""
+    """Inject disable-ads option + guards into sponsored_messages entry points."""
+    done: list[str] = []
+    out = _ensure_include(cpp_text, '#include "base/options.h"\n')
+
+    option_block = (
+        "\n"
+        "const char kOptionNoadsDisableAds[] = \"noads-disable-ads\";\n"
+        "\n"
+        "base::options::toggle OptionNoadsDisableAds({\n"
+        "\t.id = kOptionNoadsDisableAds,\n"
+        "\t.name = \"禁用赞助广告\",\n"
+        "\t.description = \"关闭频道与机器人对话中的赞助消息（仅本客户端，默认开启）。\",\n"
+        "\t.defaultValue = true,\n"
+        "});\n"
+    )
+    if "kOptionNoadsDisableAds" not in out:
+        anchor = "namespace Data {\nnamespace {\n"
+        if anchor not in out:
+            raise CliError("sponsored: namespace Data anchor missing")
+        out = out.replace(anchor, anchor + option_block, 1)
+        done.append("OptionNoadsDisableAds")
+    else:
+        done.append("OptionNoadsDisableAds(exists)")
+
+    guard = "\tif (OptionNoadsDisableAds.value()) {\n\t\treturn false;\n\t}\n"
     signatures = [
         "bool SponsoredMessages::canHaveFor(not_null<History*> history) const",
         "bool SponsoredMessages::canHaveFor(not_null<HistoryItem*> item) const",
         "bool SponsoredMessages::isTopBarFor(not_null<History*> history) const",
     ]
-    out = cpp_text
-    done: list[str] = []
     for sig in signatures:
-        out, ok = _replace_function_body(out, sig)
-        if ok:
-            done.append(sig)
-    if len(done) != len(signatures):
-        missing = [s for s in signatures if s not in done]
-        raise CliError(
-            "auto-heal could not find all sponsored entry points:\n  - "
-            + "\n  - ".join(missing)
-        )
+        pat = re.compile(re.escape(sig) + r"[ \t]*\{", re.MULTILINE)
+        m = pat.search(out)
+        if not m:
+            raise CliError(f"auto-heal missing {sig}")
+        brace = m.end() - 1
+        window = out[brace : brace + 120]
+        if "OptionNoadsDisableAds.value()" in window:
+            done.append(sig + "(exists)")
+            continue
+        nl = out.find("\n", brace)
+        if nl < 0:
+            raise CliError(f"no newline after {sig}")
+        out = out[: nl + 1] + guard + out[nl + 1 :]
+        done.append(sig)
     return out, done
 
 
 def generate_unified_patch(original: str, patched: str, relpath: str) -> str:
     a = original.splitlines(keepends=True)
     b = patched.splitlines(keepends=True)
-    # Ensure trailing newline consistency for diff
     if a and not a[-1].endswith("\n"):
         a[-1] += "\n"
     if b and not b[-1].endswith("\n"):
@@ -308,12 +347,12 @@ def generate_unified_patch(original: str, patched: str, relpath: str) -> str:
     if not text.endswith("\n"):
         text += "\n"
     if not text.strip():
-        raise CliError("generated empty patch (source already no-ads?)")
+        raise CliError("generated empty patch (source already patched?)")
     return text
 
 
 def auto_heal_patch(src: Path, patch_path: Path) -> str:
-    """Rewrite sponsored_messages.cpp entry points and regenerate no-ads patch."""
+    """Regenerate no-ads (settings-aware) patch."""
     target = src / SPONSORED_REL
     if not target.is_file():
         raise CliError(f"missing {SPONSORED_REL} under {src}")
@@ -336,62 +375,48 @@ def auto_heal_patch(src: Path, patch_path: Path) -> str:
 
 
 def heal_local_premium_sources(main_session: str, peer_values: str) -> tuple[str, str, list[str]]:
-    """Client-side localPremium: force Session::premium and AmPremiumValue."""
+    """Inject localPremium option + guards (settings-aware)."""
     done: list[str] = []
 
-    old_prem = (
-        "bool Session::premium() const {\n"
-        "\treturn _user->isPremium();\n"
-        "}"
+    ms = _ensure_include(main_session, '#include "base/options.h"\n')
+    option_block = (
+        "\n"
+        "const char kOptionNoadsLocalPremium[] = \"noads-local-premium\";\n"
+        "\n"
+        "base::options::toggle OptionNoadsLocalPremium({\n"
+        "\t.id = kOptionNoadsLocalPremium,\n"
+        "\t.name = \"本地大会员\",\n"
+        "\t.description = \"仅在本客户端伪装为 Premium，不解锁服务器校验功能（上传上限等仍无效）。修改后建议重启。\",\n"
+        "\t.defaultValue = true,\n"
+        "\t.restartRequired = true,\n"
+        "});\n"
+        "\n"
     )
-    new_prem = (
-        "bool Session::premium() const {\n"
-        "\treturn true; // localPremium: client-side only\n"
-        "}"
-    )
-    if old_prem in main_session:
-        main_session = main_session.replace(old_prem, new_prem, 1)
+    if "kOptionNoadsLocalPremium" not in ms:
+        anchor = "namespace Main {\n"
+        if anchor not in ms:
+            raise CliError("main_session: namespace Main missing")
+        ms = ms.replace(anchor, option_block + anchor, 1)
+        done.append("OptionNoadsLocalPremium")
+    else:
+        done.append("OptionNoadsLocalPremium(exists)")
+
+    sig = "bool Session::premium() const"
+    pat = re.compile(re.escape(sig) + r"[ \t]*\{", re.MULTILINE)
+    m = pat.search(ms)
+    if not m:
+        raise CliError("auto-heal could not locate Session::premium()")
+    brace = m.end() - 1
+    window = ms[brace : brace + 160]
+    if "OptionNoadsLocalPremium.value()" not in window:
+        nl = ms.find("\n", brace)
+        guard = "\tif (OptionNoadsLocalPremium.value()) {\n\t\treturn true;\n\t}\n"
+        ms = ms[: nl + 1] + guard + ms[nl + 1 :]
         done.append("Session::premium")
     else:
-        # tolerate formatting drift: replace whole function body with return true
-        sig = "bool Session::premium() const"
-        tmp, ok = _replace_function_body(main_session, sig)
-        if not ok:
-            raise CliError("auto-heal could not locate Session::premium()")
-        main_session = tmp.replace(
-            f"{sig} {{\n\treturn false;\n}}",
-            new_prem,
-            1,
-        )
-        if "bool Session::premium() const" in main_session and "return true" not in main_session[
-            main_session.find("bool Session::premium() const") : main_session.find(
-                "bool Session::premium() const"
-            )
-            + 120
-        ]:
-            # force insert new_prem by brace matching again
-            pat = re.compile(re.escape(sig) + r"[ \t]*\{", re.MULTILINE)
-            m = pat.search(main_session)
-            if not m:
-                raise CliError("Session::premium signature missing after rewrite")
-            start = m.start()
-            i = m.end() - 1
-            depth = 0
-            end = None
-            while i < len(main_session):
-                if main_session[i] == "{":
-                    depth += 1
-                elif main_session[i] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        end = i + 1
-                        break
-                i += 1
-            if end is None:
-                raise CliError("Session::premium brace match failed")
-            main_session = main_session[:start] + new_prem + main_session[end:]
-        done.append("Session::premium")
+        done.append("Session::premium(exists)")
 
+    pv = _ensure_include(peer_values, '#include "base/options.h"\n')
     old_am = (
         "rpl::producer<bool> AmPremiumValue(not_null<Main::Session*> session) {\n"
         "\treturn PeerPremiumValue(session->user());\n"
@@ -399,41 +424,45 @@ def heal_local_premium_sources(main_session: str, peer_values: str) -> tuple[str
     )
     new_am = (
         "rpl::producer<bool> AmPremiumValue(not_null<Main::Session*> session) {\n"
-        "\treturn rpl::single(true); // localPremium: client-side only\n"
+        "\tif (base::options::value<bool>(\"noads-local-premium\")) {\n"
+        "\t\treturn rpl::single(true);\n"
+        "\t}\n"
+        "\treturn PeerPremiumValue(session->user());\n"
         "}"
     )
-    if old_am in peer_values:
-        peer_values = peer_values.replace(old_am, new_am, 1)
+    if old_am in pv:
+        pv = pv.replace(old_am, new_am, 1)
         done.append("AmPremiumValue")
+    elif "noads-local-premium" in pv and "AmPremiumValue" in pv:
+        done.append("AmPremiumValue(exists)")
     else:
-        sig = "rpl::producer<bool> AmPremiumValue(not_null<Main::Session*> session)"
-        pat = re.compile(re.escape(sig) + r"[ \t]*\{", re.MULTILINE)
-        m = pat.search(peer_values)
-        if not m:
+        sig2 = "rpl::producer<bool> AmPremiumValue(not_null<Main::Session*> session)"
+        pat2 = re.compile(re.escape(sig2) + r"[ \t]*\{", re.MULTILINE)
+        m2 = pat2.search(pv)
+        if not m2:
             raise CliError("auto-heal could not locate AmPremiumValue()")
-        start = m.start()
-        i = m.end() - 1
+        start = m2.start()
+        i = m2.end() - 1
         depth = 0
-        end = None
-        while i < len(peer_values):
-            if peer_values[i] == "{":
+        endpos = None
+        while i < len(pv):
+            if pv[i] == "{":
                 depth += 1
-            elif peer_values[i] == "}":
+            elif pv[i] == "}":
                 depth -= 1
                 if depth == 0:
-                    end = i + 1
+                    endpos = i + 1
                     break
             i += 1
-        if end is None:
+        if endpos is None:
             raise CliError("AmPremiumValue brace match failed")
-        peer_values = peer_values[:start] + new_am + peer_values[end:]
+        pv = pv[:start] + new_am + pv[endpos:]
         done.append("AmPremiumValue")
 
-    return main_session, peer_values, done
+    return ms, pv, done
 
 
 def auto_heal_local_premium_patch(src: Path, patch_path: Path) -> str:
-    """Regenerate local-premium patch from current upstream sources."""
     f1 = src / MAIN_SESSION_REL
     f2 = src / PEER_VALUES_REL
     if not f1.is_file() or not f2.is_file():
@@ -458,12 +487,62 @@ def auto_heal_local_premium_patch(src: Path, patch_path: Path) -> str:
     return patch_text
 
 
+def heal_experimental_source(cpp_text: str) -> tuple[str, list[str]]:
+    """Register zh toggles in Experimental settings page."""
+    done: list[str] = []
+    out = cpp_text
+    lines_to_add = [
+        '\taddToggle("noads-disable-ads");\n',
+        '\taddToggle("noads-local-premium");\n',
+    ]
+    if 'addToggle("noads-disable-ads")' in out and 'addToggle("noads-local-premium")' in out:
+        return out, ["experimental toggles(exists)"]
+
+    marker = "\taddToggle(FFmpeg::kOptionFFmpegMultiThread);\n"
+    if marker in out:
+        out = out.replace(
+            marker,
+            marker + lines_to_add[0] + lines_to_add[1],
+            1,
+        )
+        done.append("addToggle noads-* after FFmpeg")
+        return out, done
+
+    matches = list(re.finditer(r"\taddToggle\([^\n]+\);\n", out))
+    if not matches:
+        raise CliError("experimental: no addToggle() found")
+    last = matches[-1]
+    out = out[: last.end()] + lines_to_add[0] + lines_to_add[1] + out[last.end() :]
+    done.append("addToggle noads-* after last toggle")
+    return out, done
+
+
+def auto_heal_settings_patch(src: Path, patch_path: Path) -> str:
+    target = src / EXPERIMENTAL_REL
+    if not target.is_file():
+        raise CliError(f"missing {EXPERIMENTAL_REL}")
+    original = target.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
+    healed, done = heal_experimental_source(original)
+    log("auto-heal settings rewrote:")
+    for s in done:
+        log(f"  - {s}")
+    patch_text = generate_unified_patch(original, healed, EXPERIMENTAL_REL.as_posix())
+    patch_path.parent.mkdir(parents=True, exist_ok=True)
+    patch_path.write_text(patch_text, encoding="utf-8", newline="\n")
+    log(f"regenerated patch: {patch_path}")
+    target.write_text(original, encoding="utf-8", newline="\n")
+    apply_patch(src, patch_path, check_only=True)
+    return patch_text
+
+
 def auto_heal_named_patch(src: Path, patch_path: Path) -> str:
     name = patch_path.name.lower()
     if "sponsored" in name or name.startswith("0001"):
         return auto_heal_patch(src, patch_path)
     if "premium" in name or name.startswith("0002"):
         return auto_heal_local_premium_patch(src, patch_path)
+    if "settings" in name or "toggle" in name or name.startswith("0003"):
+        return auto_heal_settings_patch(src, patch_path)
     raise CliError(f"no auto-heal strategy for {patch_path.name}")
 
 

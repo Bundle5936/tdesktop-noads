@@ -6,9 +6,10 @@
   "html_url": "https://github.com/telegramdesktop/tdesktop/releases/tag/v7.0.3",
   "patches": [
     "patches/0001-no-sponsored-messages.patch",
-    "patches/0002-local-premium.patch"
+    "patches/0002-local-premium.patch",
+    "patches/0003-settings-zh-toggles.patch"
   ],
   "patch_status": "ok",
   "healed": false,
-  "notes": "no-ads + localPremium (client-side). Windows portable via build-windows."
+  "notes": "no-ads + localPremium + Chinese experimental toggles (default ON)."
 }

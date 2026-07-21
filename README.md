@@ -2,57 +2,67 @@
 
 **纯 GitHub**：自动跟随官方 Telegram Desktop，打补丁，编译 **Windows x64 便携包**。
 
-## 补丁
+## 功能（中文设置开关）
 
-| 文件 | 作用 | 限制 |
-|------|------|------|
-| `0001-no-sponsored-messages.patch` | 关闭赞助广告 | 仅本客户端 |
-| `0002-local-premium.patch` | **本地大会员**（UI 伪装） | **不能**解锁服务器校验功能 |
+在客户端：
 
-### localPremium 能做什么 / 不能做什么
+**设置 → 高级 → 实验性功能（Experimental）**
 
-| 通常有效（客户端判断） | 通常无效（服务器校验） |
-|------------------------|------------------------|
-| 界面显示 Premium | 更大上传体积 |
-| 部分本地限制/入口 | 官方 Premium 专属贴纸包等 |
-| 与去广告补丁配合 | 真正的会员业务权益 |
+会出现两个 **中文** 开关（默认都开）：
 
-去广告靠 `0001`，不靠 localPremium。
+| 开关 | 说明 |
+|------|------|
+| **禁用赞助广告** | 关闭频道/机器人赞助消息（仅本客户端） |
+| **本地大会员** | UI 伪装 Premium；**不能**解锁服务器校验权益；改后建议重启 |
 
-## 你拿到什么
+底层补丁：
 
-Release 里的：
+| 文件 | 作用 |
+|------|------|
+| `0001-no-sponsored-messages.patch` | 去广告 + 注册开关 |
+| `0002-local-premium.patch` | 本地大会员 + 注册开关 |
+| `0003-settings-zh-toggles.patch` | 把开关挂到「实验性功能」页 |
 
-`tportable-x64-noads-<version>.zip`
+### localPremium 能 / 不能
 
-解压 → 运行 `Telegram.exe`（旁有 `portable`，数据在 `tdata/`）。
+| 通常有效（客户端） | 通常无效（服务器） |
+|--------------------|--------------------|
+| 界面显示会员 | 更大上传体积 |
+| 部分本地限制/入口 | 真会员专属业务 |
+
+## 怎么用便携包
+
+Release 里的 `tportable-x64-noads-<version>.zip`：
+
+1. 解压任意目录  
+2. 运行 `Telegram.exe`  
+3. 数据在旁边 `tdata/`  
+4. 语言：设置里可切 **简体中文**（官方语言包）  
+5. 功能开关：设置 → 高级 → **实验性功能**
 
 ## 自动流程
 
 ```text
 auto-follow（每 6h）
-  → 官方新版本 + 补丁验证/自动 heal
-  → 更新 pin / tag
+  → 官方新版本 + 补丁验证 / auto-heal
   → 触发 build-windows
-       → 官方源码 + 两补丁 → 编译 → portable zip 挂 Release
+       → 官方源码 + 三补丁 → 编译 → portable zip
 ```
 
-## 一次性配置
-
-### Secrets（建议）
+## Secrets（建议）
 
 | Name | 说明 |
 |------|------|
 | `TDESKTOP_API_ID` | https://my.telegram.org/apps |
 | `TDESKTOP_API_HASH` | 同上 |
 
-不配则用公开测试 API（共用、可能限流）。
+不配则用官方公开测试 API（`611335`）。
 
-### 首次编译
+## 和其它魔改的关系
 
-Actions → **build-windows** → Run workflow  
-
-首次约 1～3 小时。完成后在 Releases 下载 zip。
+- **AyuGram Desktop**：完整 fork + 大量功能（Ghost、保存等）；我们只借「可开关」思路。  
+- **Forkgram**：一堆 QoL（方形头像、置顶窗口、默认双向删除等），见下文对照；**未**全部移植。  
+- 本仓库：**补丁化** 去广告 + 本地大会员 + 中文实验开关。
 
 ## 风险
 

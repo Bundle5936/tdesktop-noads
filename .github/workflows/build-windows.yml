@@ -119,8 +119,9 @@ jobs:
             --patches-dir "$GITHUB_WORKSPACE/noads/patches" \
             --cli "$GITHUB_WORKSPACE/noads/cli/tdesktop_noads.py" \
             --heal-on-fail
-          echo "--- sponsored ---"; grep -n "return false" "$TBUILD/tdesktop/Telegram/SourceFiles/data/components/sponsored_messages.cpp" | head || true
-          echo "--- premium ---"; grep -n "localPremium" "$TBUILD/tdesktop/Telegram/SourceFiles/main/main_session.cpp" "$TBUILD/tdesktop/Telegram/SourceFiles/data/data_peer_values.cpp" || true
+          echo "--- sponsored ---"; grep -n "noads-disable-ads\|OptionNoadsDisableAds" "$TBUILD/tdesktop/Telegram/SourceFiles/data/components/sponsored_messages.cpp" | head || true
+          echo "--- premium ---"; grep -n "noads-local-premium\|OptionNoadsLocalPremium" "$TBUILD/tdesktop/Telegram/SourceFiles/main/main_session.cpp" "$TBUILD/tdesktop/Telegram/SourceFiles/data/data_peer_values.cpp" | head || true
+          echo "--- settings ---"; grep -n "noads-" "$TBUILD/tdesktop/Telegram/SourceFiles/settings/settings_experimental.cpp" | head || true
 
       - name: First set up
         shell: bash
@@ -245,8 +246,9 @@ jobs:
           =====================================
           Upstream: ${{ steps.meta.outputs.tag }}
           Patches:
-            - disable Sponsored Messages (client-side)
-            - localPremium UI spoof (client-side only)
+            - 禁用赞助广告 (settings toggle, default ON)
+            - 本地大会员 (settings toggle, default ON, client-side only)
+            - UI: 设置 -> 高级 -> 实验性功能
           API credentials source: ${{ steps.meta.outputs.api_source }}
 
           Usage:
@@ -288,7 +290,7 @@ jobs:
 
             - Upstream: https://github.com/telegramdesktop/tdesktop/releases/tag/${{ steps.meta.outputs.tag }}
             - Windows portable: `tportable-x64-noads-${{ steps.meta.outputs.ver }}.zip`
-            - Patches: no-ads + localPremium (client-side)
+            - Patches: no-ads + localPremium + 中文实验开关
             - API: `${{ steps.meta.outputs.api_source }}`
 
             Extract → run `Telegram.exe`. Data in `tdata/`.

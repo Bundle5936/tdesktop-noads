@@ -1,22 +1,58 @@
 --- a/Telegram/SourceFiles/main/main_session.cpp
 +++ b/Telegram/SourceFiles/main/main_session.cpp
-@@ -343,7 +343,7 @@
+@@ -53,6 +53,7 @@
+ #include "window/window_controller.h"
+ #include "window/window_lock_widgets.h"
+ #include "base/unixtime.h"
++#include "base/options.h"
+ #include "calls/calls_instance.h"
+ #include "support/support_helper.h"
+ #include "lang/lang_keys.h"
+@@ -64,6 +65,17 @@
+ #ifndef TDESKTOP_DISABLE_SPELLCHECK
+ #include "chat_helpers/spellchecker_common.h"
+ #endif // TDESKTOP_DISABLE_SPELLCHECK
++
++
++const char kOptionNoadsLocalPremium[] = "noads-local-premium";
++
++base::options::toggle OptionNoadsLocalPremium({
++	.id = kOptionNoadsLocalPremium,
++	.name = "本地大会员",
++	.description = "仅在本客户端伪装为 Premium，不解锁服务器校验功能（上传上限等仍无效）。修改后建议重启。",
++	.defaultValue = true,
++	.restartRequired = true,
++});
+ 
+ namespace Main {
+ namespace {
+@@ -343,6 +355,9 @@
  }
  
  bool Session::premium() const {
--	return _user->isPremium();
-+	return true; // localPremium: client-side only
++	if (OptionNoadsLocalPremium.value()) {
++		return true;
++	}
+ 	return _user->isPremium();
  }
  
- bool Session::premiumPossible() const {
 --- a/Telegram/SourceFiles/data/data_peer_values.cpp
 +++ b/Telegram/SourceFiles/data/data_peer_values.cpp
-@@ -404,7 +404,7 @@
+@@ -19,6 +19,7 @@
+ #include "main/main_app_config.h"
+ #include "ui/image/image_prepare.h"
+ #include "base/unixtime.h"
++#include "base/options.h"
+ 
+ namespace Data {
+ namespace {
+@@ -404,6 +405,9 @@
  }
  
  rpl::producer<bool> AmPremiumValue(not_null<Main::Session*> session) {
--	return PeerPremiumValue(session->user());
-+	return rpl::single(true); // localPremium: client-side only
++	if (base::options::value<bool>("noads-local-premium")) {
++		return rpl::single(true);
++	}
+ 	return PeerPremiumValue(session->user());
  }
  
- TimeId SortByOnlineValue(not_null<UserData*> user, TimeId now) {
