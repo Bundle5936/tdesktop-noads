@@ -1,8 +1,11 @@
 {
   "upstream_repo": "telegramdesktop/tdesktop",
   "tag": "v7.0.3",
-  "checked_at": "2026-07-18T09:00:15Z",
+  "checked_at": "2026-07-21T14:30:26Z",
+  "published_at": "2026-07-18T09:00:15Z",
+  "html_url": "https://github.com/telegramdesktop/tdesktop/releases/tag/v7.0.3",
   "patch": "patches/0001-no-sponsored-messages.patch",
   "patch_status": "ok",
-  "notes": "Initial pin. Patch verified against v7.0.3 sponsored_messages.cpp."
+  "healed": false,
+  "notes": "Auto-followed v7.0.3; existing patch applies."
 }
