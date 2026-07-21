@@ -31,6 +31,10 @@ SPONSORED_REL = Path("Telegram/SourceFiles/data/components/sponsored_messages.cp
 MAIN_SESSION_REL = Path("Telegram/SourceFiles/main/main_session.cpp")
 PEER_VALUES_REL = Path("Telegram/SourceFiles/data/data_peer_values.cpp")
 EXPERIMENTAL_REL = Path("Telegram/SourceFiles/settings/settings_experimental.cpp")
+NOADS_SETTINGS_H = Path("Telegram/SourceFiles/settings/settings_noads.h")
+NOADS_SETTINGS_CPP = Path("Telegram/SourceFiles/settings/settings_noads.cpp")
+CMAKE_REL = Path("Telegram/CMakeLists.txt")
+SETTINGS_MAIN_REL = Path("Telegram/SourceFiles/settings/sections/settings_main.cpp")
 USER_AGENT = "tdesktop-noads-cli/0.5 (+https://github.com/vcshixin/tdesktop-noads)"
 
 
@@ -487,50 +491,280 @@ def auto_heal_local_premium_patch(src: Path, patch_path: Path) -> str:
     return patch_text
 
 
-def heal_experimental_source(cpp_text: str) -> tuple[str, list[str]]:
-    """Register zh toggles in Experimental settings page."""
-    done: list[str] = []
-    out = cpp_text
-    lines_to_add = [
-        '\taddToggle("noads-disable-ads");\n',
-        '\taddToggle("noads-local-premium");\n',
-    ]
-    if 'addToggle("noads-disable-ads")' in out and 'addToggle("noads-local-premium")' in out:
-        return out, ["experimental toggles(exists)"]
+def _noads_settings_h_text() -> str:
+    return (
+        "/*\n"
+        "This file is part of tdesktop-noads patches for Telegram Desktop.\n"
+        "*/\n"
+        "#pragma once\n"
+        "\n"
+        "#include \"settings/settings_common_session.h\"\n"
+        "\n"
+        "namespace Settings {\n"
+        "\n"
+        "class NoAds : public Section<NoAds> {\n"
+        "public:\n"
+        "\tNoAds(\n"
+        "\t\tQWidget *parent,\n"
+        "\t\tnot_null<Window::SessionController*> controller);\n"
+        "\n"
+        "\t[[nodiscard]] rpl::producer<QString> title() override;\n"
+        "\n"
+        "private:\n"
+        "\tvoid setupContent();\n"
+        "\n"
+        "};\n"
+        "\n"
+        "[[nodiscard]] Type NoAdsId();\n"
+        "\n"
+        "} // namespace Settings\n"
+    )
 
-    marker = "\taddToggle(FFmpeg::kOptionFFmpegMultiThread);\n"
-    if marker in out:
-        out = out.replace(
-            marker,
-            marker + lines_to_add[0] + lines_to_add[1],
-            1,
-        )
-        done.append("addToggle noads-* after FFmpeg")
+
+def _noads_settings_cpp_text() -> str:
+    return (
+        "/*\n"
+        "This file is part of tdesktop-noads patches for Telegram Desktop.\n"
+        "*/\n"
+        "#include \"settings/settings_noads.h\"\n"
+        "\n"
+        "#include \"base/options.h\"\n"
+        "#include \"base/timer.h\"\n"
+        "#include \"core/application.h\"\n"
+        "#include \"lang/lang_keys.h\"\n"
+        "#include \"settings/settings_common.h\"\n"
+        "#include \"styles/style_layers.h\"\n"
+        "#include \"styles/style_menu_icons.h\"\n"
+        "#include \"styles/style_settings.h\"\n"
+        "#include \"ui/boxes/confirm_box.h\"\n"
+        "#include \"ui/vertical_list.h\"\n"
+        "#include \"ui/widgets/buttons.h\"\n"
+        "#include \"ui/widgets/labels.h\"\n"
+        "#include \"ui/wrap/vertical_layout.h\"\n"
+        "#include \"window/window_session_controller.h\"\n"
+        "#include \"window/window_controller.h\"\n"
+        "\n"
+        "namespace Settings {\n"
+        "namespace {\n"
+        "\n"
+        "void AddNoadsToggle(\n"
+        "\t\tnot_null<Window::Controller*> window,\n"
+        "\t\tnot_null<Ui::VerticalLayout*> container,\n"
+        "\t\tconst char *optionId) {\n"
+        "\tauto &option = base::options::lookup<bool>(optionId);\n"
+        "\tconst auto name = option.name().isEmpty()\n"
+        "\t\t? QString::fromUtf8(optionId)\n"
+        "\t\t: option.name();\n"
+        "\tconst auto description = option.description();\n"
+        "\n"
+        "\tUi::AddSkip(container, st::settingsCheckboxesSkip);\n"
+        "\n"
+        "\tconst auto toggles = container->lifetime().make_state<rpl::event_stream<bool>>();\n"
+        "\tconst auto button = container->add(object_ptr<Button>(\n"
+        "\t\tcontainer,\n"
+        "\t\trpl::single(name),\n"
+        "\t\tst::settingsButtonNoIcon\n"
+        "\t))->toggleOn(toggles->events_starting_with(option.value()));\n"
+        "\n"
+        "\tconst auto restarter = option.restartRequired()\n"
+        "\t\t? button->lifetime().make_state<base::Timer>()\n"
+        "\t\t: nullptr;\n"
+        "\tif (restarter) {\n"
+        "\t\trestarter->setCallback([=] {\n"
+        "\t\t\twindow->show(Ui::MakeConfirmBox({\n"
+        "\t\t\t\t.text = tr::lng_settings_need_restart(),\n"
+        "\t\t\t\t.confirmed = [] { Core::Restart(); },\n"
+        "\t\t\t\t.confirmText = tr::lng_settings_restart_now(),\n"
+        "\t\t\t\t.cancelText = tr::lng_settings_restart_later(),\n"
+        "\t\t\t}));\n"
+        "\t\t});\n"
+        "\t}\n"
+        "\n"
+        "\tbutton->toggledChanges(\n"
+        "\t) | rpl::on_next([=, &option](bool toggled) {\n"
+        "\t\tif (option.value() == toggled) {\n"
+        "\t\t\treturn;\n"
+        "\t\t}\n"
+        "\t\toption.set(toggled);\n"
+        "\t\tif (restarter) {\n"
+        "\t\t\trestarter->callOnce(st::settingsButtonNoIcon.toggle.duration);\n"
+        "\t\t}\n"
+        "\t}, button->lifetime());\n"
+        "\n"
+        "\tif (!description.isEmpty()) {\n"
+        "\t\tUi::AddSkip(container, st::settingsCheckboxesSkip);\n"
+        "\t\tUi::AddDividerText(container, rpl::single(description));\n"
+        "\t\tUi::AddSkip(container, st::settingsCheckboxesSkip);\n"
+        "\t}\n"
+        "}\n"
+        "\n"
+        "} // namespace\n"
+        "\n"
+        "NoAds::NoAds(\n"
+        "\tQWidget *parent,\n"
+        "\tnot_null<Window::SessionController*> controller)\n"
+        ": Section(parent, controller) {\n"
+        "\tsetupContent();\n"
+        "}\n"
+        "\n"
+        "rpl::producer<QString> NoAds::title() {\n"
+        "\treturn rpl::single(u\"去广告与本地会员\"_q);\n"
+        "}\n"
+        "\n"
+        "void NoAds::setupContent() {\n"
+        "\tconst auto content = Ui::CreateChild<Ui::VerticalLayout>(this);\n"
+        "\tconst auto window = &controller()->window();\n"
+        "\n"
+        "\tUi::AddSkip(content);\n"
+        "\tUi::AddSubsectionTitle(\n"
+        "\t\tcontent,\n"
+        "\t\trpl::single(u\"tdesktop-noads\"_q));\n"
+        "\n"
+        "\tcontent->add(\n"
+        "\t\tobject_ptr<Ui::FlatLabel>(\n"
+        "\t\t\tcontent,\n"
+        "\t\t\trpl::single(\n"
+        "\t\t\t\tu\"以下开关仅影响本客户端。本地大会员不能解锁服务器校验的会员权益（例如更大上传限制）。\"_q),\n"
+        "\t\t\tst::boxLabel),\n"
+        "\t\tst::defaultBoxDividerLabelPadding);\n"
+        "\n"
+        "\tUi::AddSkip(content);\n"
+        "\tUi::AddDivider(content);\n"
+        "\tUi::AddSkip(content);\n"
+        "\n"
+        "\tUi::AddSubsectionTitle(\n"
+        "\t\tcontent,\n"
+        "\t\trpl::single(u\"功能开关\"_q));\n"
+        "\n"
+        "\tAddNoadsToggle(window, content, \"noads-disable-ads\");\n"
+        "\tAddNoadsToggle(window, content, \"noads-local-premium\");\n"
+        "\n"
+        "\tUi::AddSkip(content);\n"
+        "\tUi::AddDividerText(\n"
+        "\t\tcontent,\n"
+        "\t\trpl::single(\n"
+        "\t\t\tu\"非官方构建。设置保存在本机实验选项配置中，可随时开关。\"_q));\n"
+        "\n"
+        "\tUi::ResizeFitChild(this, content);\n"
+        "}\n"
+        "\n"
+        "Type NoAdsId() {\n"
+        "\treturn NoAds::Id();\n"
+        "}\n"
+        "\n"
+        "} // namespace Settings\n"
+    )
+
+
+def heal_cmake_source(cmake: str) -> tuple[str, list[str]]:
+    done: list[str] = []
+    if "settings/settings_noads.cpp" in cmake:
+        return cmake, ["cmake(exists)"]
+    marker = "    settings/settings_experimental.h\n"
+    if marker not in cmake:
+        raise CliError("cmake: experimental entries missing")
+    cmake = cmake.replace(
+        marker,
+        marker
+        + "    settings/settings_noads.cpp\n"
+        + "    settings/settings_noads.h\n",
+        1,
+    )
+    done.append("cmake add settings_noads")
+    return cmake, done
+
+
+def heal_settings_main_source(main_cpp: str) -> tuple[str, list[str]]:
+    done: list[str] = []
+    out = main_cpp
+    if '#include "settings/settings_noads.h"' not in out:
+        anchor = '#include "settings/settings_power_saving.h"\n'
+        if anchor not in out:
+            m = re.search(r'#include "settings/[^"]+"\n', out)
+            if not m:
+                raise CliError("settings_main: no settings includes")
+            out = out[: m.end()] + '#include "settings/settings_noads.h"\n' + out[m.end() :]
+        else:
+            out = out.replace(anchor, anchor + '#include "settings/settings_noads.h"\n', 1)
+        done.append("include settings_noads.h")
+    else:
+        done.append("include(exists)")
+
+    if "NoAdsId()" in out:
+        done.append("menu button(exists)")
         return out, done
 
-    matches = list(re.finditer(r"\taddToggle\([^\n]+\);\n", out))
-    if not matches:
-        raise CliError("experimental: no addToggle() found")
-    last = matches[-1]
-    out = out[: last.end()] + lines_to_add[0] + lines_to_add[1] + out[last.end() :]
-    done.append("addToggle noads-* after last toggle")
+    btn = (
+        "\n"
+        "\tbuilder.addSectionButton({\n"
+        "\t\t.title = rpl::single(u\"去广告与本地会员\"_q),\n"
+        "\t\t.targetSection = NoAdsId(),\n"
+        "\t\t.icon = { &st::menuIconFave },\n"
+        "\t\t.keywords = {\n"
+        "\t\t\tu\"ads\"_q,\n"
+        "\t\t\tu\"premium\"_q,\n"
+        "\t\t\tu\"noads\"_q,\n"
+        "\t\t\tu\"赞助\"_q,\n"
+        "\t\t\tu\"会员\"_q,\n"
+        "\t\t},\n"
+        "\t});\n"
+    )
+    anchor = (
+        "\tbuilder.addSectionButton({\n"
+        "\t\t.title = tr::lng_settings_advanced(),\n"
+        "\t\t.targetSection = AdvancedId(),\n"
+    )
+    idx = out.find(anchor)
+    if idx < 0:
+        raise CliError("settings_main: Advanced section button missing")
+    j = out.find("});", idx)
+    if j < 0:
+        raise CliError("settings_main: Advanced button end missing")
+    j = j + 3
+    out = out[:j] + btn + out[j:]
+    done.append("menu button NoAds")
     return out, done
 
 
 def auto_heal_settings_patch(src: Path, patch_path: Path) -> str:
-    target = src / EXPERIMENTAL_REL
-    if not target.is_file():
-        raise CliError(f"missing {EXPERIMENTAL_REL}")
-    original = target.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
-    healed, done = heal_experimental_source(original)
-    log("auto-heal settings rewrote:")
-    for s in done:
+    """Regenerate dedicated Chinese NoAds settings page patch."""
+    done_all: list[str] = []
+    parts: list[str] = []
+
+    h_text = _noads_settings_h_text()
+    c_text = _noads_settings_cpp_text()
+    parts.append(generate_unified_patch("", h_text, NOADS_SETTINGS_H.as_posix()))
+    parts.append(generate_unified_patch("", c_text, NOADS_SETTINGS_CPP.as_posix()))
+    done_all += ["settings_noads.h", "settings_noads.cpp"]
+
+    cmake_path = src / CMAKE_REL
+    main_path = src / SETTINGS_MAIN_REL
+    if not cmake_path.is_file() or not main_path.is_file():
+        raise CliError("missing CMakeLists.txt or settings_main.cpp")
+
+    o_cmake = cmake_path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
+    o_main = main_path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
+    n_cmake, d1 = heal_cmake_source(o_cmake)
+    n_main, d2 = heal_settings_main_source(o_main)
+    done_all += d1 + d2
+    parts.append(generate_unified_patch(o_cmake, n_cmake, CMAKE_REL.as_posix()))
+    parts.append(generate_unified_patch(o_main, n_main, SETTINGS_MAIN_REL.as_posix()))
+
+    log("auto-heal NoAds settings page rewrote:")
+    for s in done_all:
         log(f"  - {s}")
-    patch_text = generate_unified_patch(original, healed, EXPERIMENTAL_REL.as_posix())
+
+    patch_text = "".join(parts)
     patch_path.parent.mkdir(parents=True, exist_ok=True)
     patch_path.write_text(patch_text, encoding="utf-8", newline="\n")
     log(f"regenerated patch: {patch_path}")
-    target.write_text(original, encoding="utf-8", newline="\n")
+
+    cmake_path.write_text(o_cmake, encoding="utf-8", newline="\n")
+    main_path.write_text(o_main, encoding="utf-8", newline="\n")
+    for rel in (NOADS_SETTINGS_H, NOADS_SETTINGS_CPP):
+        fp = src / rel
+        if fp.is_file():
+            fp.unlink()
     apply_patch(src, patch_path, check_only=True)
     return patch_text
 
@@ -541,7 +775,7 @@ def auto_heal_named_patch(src: Path, patch_path: Path) -> str:
         return auto_heal_patch(src, patch_path)
     if "premium" in name or name.startswith("0002"):
         return auto_heal_local_premium_patch(src, patch_path)
-    if "settings" in name or "toggle" in name or name.startswith("0003"):
+    if "noads-page" in name or "settings" in name or name.startswith("0003"):
         return auto_heal_settings_patch(src, patch_path)
     raise CliError(f"no auto-heal strategy for {patch_path.name}")
 
@@ -587,7 +821,7 @@ def write_release_notes(path: Path, release: dict, tag: str, *, healed: bool) ->
         f"- Patches: `{patches}` — **{mode}**\n\n"
         f"### Features\n\n"
         f"- No Sponsored Messages (client-side)\n"
-        f"- Local Premium (client-side UI spoof; server-gated features still need real Premium)\n\n"
+        f"- Local Premium (client-side UI spoof; server-gated features still need real Premium)\n- Chinese settings page: 设置 -> 去广告与本地会员\n\n"
         f"### Official changelog\n\n{body}\n\n"
         f"### Portable build\n\n"
         f"Windows x64 portable zip is produced by `build-windows` workflow and attached here.\n",

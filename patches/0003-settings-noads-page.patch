@@ -1,0 +1,202 @@
+--- a/Telegram/SourceFiles/settings/settings_noads.h
++++ b/Telegram/SourceFiles/settings/settings_noads.h
+@@ -0,0 +1,25 @@
++/*
++This file is part of tdesktop-noads patches for Telegram Desktop.
++*/
++#pragma once
++
++#include "settings/settings_common_session.h"
++
++namespace Settings {
++
++class NoAds : public Section<NoAds> {
++public:
++	NoAds(
++		QWidget *parent,
++		not_null<Window::SessionController*> controller);
++
++	[[nodiscard]] rpl::producer<QString> title() override;
++
++private:
++	void setupContent();
++
++};
++
++[[nodiscard]] Type NoAdsId();
++
++} // namespace Settings
+--- a/Telegram/SourceFiles/settings/settings_noads.cpp
++++ b/Telegram/SourceFiles/settings/settings_noads.cpp
+@@ -0,0 +1,130 @@
++/*
++This file is part of tdesktop-noads patches for Telegram Desktop.
++*/
++#include "settings/settings_noads.h"
++
++#include "base/options.h"
++#include "base/timer.h"
++#include "core/application.h"
++#include "lang/lang_keys.h"
++#include "settings/settings_common.h"
++#include "styles/style_layers.h"
++#include "styles/style_menu_icons.h"
++#include "styles/style_settings.h"
++#include "ui/boxes/confirm_box.h"
++#include "ui/vertical_list.h"
++#include "ui/widgets/buttons.h"
++#include "ui/widgets/labels.h"
++#include "ui/wrap/vertical_layout.h"
++#include "window/window_session_controller.h"
++#include "window/window_controller.h"
++
++namespace Settings {
++namespace {
++
++void AddNoadsToggle(
++		not_null<Window::Controller*> window,
++		not_null<Ui::VerticalLayout*> container,
++		const char *optionId) {
++	auto &option = base::options::lookup<bool>(optionId);
++	const auto name = option.name().isEmpty()
++		? QString::fromUtf8(optionId)
++		: option.name();
++	const auto description = option.description();
++
++	Ui::AddSkip(container, st::settingsCheckboxesSkip);
++
++	const auto toggles = container->lifetime().make_state<rpl::event_stream<bool>>();
++	const auto button = container->add(object_ptr<Button>(
++		container,
++		rpl::single(name),
++		st::settingsButtonNoIcon
++	))->toggleOn(toggles->events_starting_with(option.value()));
++
++	const auto restarter = option.restartRequired()
++		? button->lifetime().make_state<base::Timer>()
++		: nullptr;
++	if (restarter) {
++		restarter->setCallback([=] {
++			window->show(Ui::MakeConfirmBox({
++				.text = tr::lng_settings_need_restart(),
++				.confirmed = [] { Core::Restart(); },
++				.confirmText = tr::lng_settings_restart_now(),
++				.cancelText = tr::lng_settings_restart_later(),
++			}));
++		});
++	}
++
++	button->toggledChanges(
++	) | rpl::on_next([=, &option](bool toggled) {
++		if (option.value() == toggled) {
++			return;
++		}
++		option.set(toggled);
++		if (restarter) {
++			restarter->callOnce(st::settingsButtonNoIcon.toggle.duration);
++		}
++	}, button->lifetime());
++
++	if (!description.isEmpty()) {
++		Ui::AddSkip(container, st::settingsCheckboxesSkip);
++		Ui::AddDividerText(container, rpl::single(description));
++		Ui::AddSkip(container, st::settingsCheckboxesSkip);
++	}
++}
++
++} // namespace
++
++NoAds::NoAds(
++	QWidget *parent,
++	not_null<Window::SessionController*> controller)
++: Section(parent, controller) {
++	setupContent();
++}
++
++rpl::producer<QString> NoAds::title() {
++	return rpl::single(u"去广告与本地会员"_q);
++}
++
++void NoAds::setupContent() {
++	const auto content = Ui::CreateChild<Ui::VerticalLayout>(this);
++	const auto window = &controller()->window();
++
++	Ui::AddSkip(content);
++	Ui::AddSubsectionTitle(
++		content,
++		rpl::single(u"tdesktop-noads"_q));
++
++	content->add(
++		object_ptr<Ui::FlatLabel>(
++			content,
++			rpl::single(
++				u"以下开关仅影响本客户端。本地大会员不能解锁服务器校验的会员权益（例如更大上传限制）。"_q),
++			st::boxLabel),
++		st::defaultBoxDividerLabelPadding);
++
++	Ui::AddSkip(content);
++	Ui::AddDivider(content);
++	Ui::AddSkip(content);
++
++	Ui::AddSubsectionTitle(
++		content,
++		rpl::single(u"功能开关"_q));
++
++	AddNoadsToggle(window, content, "noads-disable-ads");
++	AddNoadsToggle(window, content, "noads-local-premium");
++
++	Ui::AddSkip(content);
++	Ui::AddDividerText(
++		content,
++		rpl::single(
++			u"非官方构建。设置保存在本机实验选项配置中，可随时开关。"_q));
++
++	Ui::ResizeFitChild(this, content);
++}
++
++Type NoAdsId() {
++	return NoAds::Id();
++}
++
++} // namespace Settings
+--- a/Telegram/CMakeLists.txt
++++ b/Telegram/CMakeLists.txt
+@@ -1777,6 +1777,8 @@
+     settings/settings_credits_graphics.h
+     settings/settings_experimental.cpp
+     settings/settings_experimental.h
++    settings/settings_noads.cpp
++    settings/settings_noads.h
+     settings/sections/settings_folders.cpp
+     settings/sections/settings_folders.h
+     settings/sections/settings_global_ttl.cpp
+--- a/Telegram/SourceFiles/settings/sections/settings_main.cpp
++++ b/Telegram/SourceFiles/settings/sections/settings_main.cpp
+@@ -56,6 +56,7 @@
+ #include "settings/sections/settings_information.h"
+ #include "settings/sections/settings_notifications.h"
+ #include "settings/settings_power_saving.h"
++#include "settings/settings_noads.h"
+ #include "settings/sections/settings_premium.h"
+ #include "settings/sections/settings_privacy_security.h"
+ #include "settings/settings_scale_preview.h"
+@@ -432,6 +433,19 @@
+ 		.targetSection = AdvancedId(),
+ 		.icon = { &st::menuIconManage },
+ 		.keywords = { u"performance"_q, u"proxy"_q, u"experimental"_q },
++	});
++
++	builder.addSectionButton({
++		.title = rpl::single(u"去广告与本地会员"_q),
++		.targetSection = NoAdsId(),
++		.icon = { &st::menuIconFave },
++		.keywords = {
++			u"ads"_q,
++			u"premium"_q,
++			u"noads"_q,
++			u"赞助"_q,
++			u"会员"_q,
++		},
+ 	});
+ 
+ 	builder.addSectionButton({
