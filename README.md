@@ -1,93 +1,88 @@
 # tdesktop-noads
 
-**纯 GitHub 自动跟随**官方 [Telegram Desktop](https://github.com/telegramdesktop/tdesktop) 发版，只保留去赞助广告补丁。
+**纯 GitHub**：自动跟随官方 [Telegram Desktop](https://github.com/telegramdesktop/tdesktop)，打上去广告补丁，并编译 **Windows x64 便携包**。
 
-> 推到 GitHub 之后：**本机可以关机**。  
-> 更新 / 验证 / 必要时重生补丁 / 打 tag / 发 Release，全部由 Actions 完成。
+> 推到 GitHub 并配好 Secrets 后，本机可以不管。  
+> 下载 Release 里的 `tportable-x64-noads-*.zip` 解压即可用。
 
-## 零本地参与流程
+## 你最终拿到什么
 
-```text
-官方 telegramdesktop/tdesktop 发布新版本
-              │
-              ▼
-     GitHub Actions（每 6 小时）
-              │
-     拉官方源码，试现有 patch
-              │
-     ┌────────┴────────┐
-     │ 能 apply        │ 不能 apply
-     ▼                 ▼
-  更新 pin          自动 heal
-  打 tag            （改 3 个入口 → 重生 patch）
-  发 Release              │
-                    ┌─────┴─────┐
-                    │ 成功      │ 仍失败（极少）
-                    ▼           ▼
-                 提交 patch   开 Issue
-                 + pin/tag
-```
-
-你**不需要**在电脑上跑任何命令来跟官方。  
-唯一可能要人看的情况：上游把广告相关代码改到函数签名都认不出来（很少）。
-
-## 仓库里有什么
-
-```text
-versions/current.json          # 当前已验证的官方 tag（CI 自动改）
-patches/*.patch                # 去广告补丁（CI 可能自动重生）
-cli/tdesktop_noads.py          # Actions 用的脚本
-.github/workflows/auto-follow.yml
-```
-
-**不包含** tdesktop 完整源码镜像，也不编 Windows 安装包。  
-只跟踪「官方这个版本 + 补丁可用」。
-
-## 一次性上线（只需这一次）
-
-把本仓库推到 GitHub 后就不用再管：
-
-```bash
-# 仅首次
-git init
-git add .
-git commit -m "init: pure GitHub auto-follow"
-# 创建并推送（示例）
-gh repo create tdesktop-noads --public --source=. --remote=origin --push
-```
-
-然后打开 **Actions → auto-follow → Run workflow** 跑第一次。  
-之后每 6 小时自动跟官方。
-
-## 补丁做了什么
-
-只动：`Telegram/SourceFiles/data/components/sponsored_messages.cpp`
-
-| 函数 | 效果 |
+| 产物 | 说明 |
 |------|------|
-| `canHaveFor(History*)` | 关频道 / Bot 广告 |
-| `canHaveFor(HistoryItem*)` | 关视频旁广告 |
-| `isTopBarFor(History*)` | 关 Bot 顶栏广告 |
+| `tportable-x64-noads-<version>.zip` | **可运行便携包**（Telegram.exe + portable 标记） |
+| `0001-no-sponsored-messages.patch` | 源码补丁（备份） |
+| `versions/current.json` | 当前跟随的官方版本 |
 
-全部短路为 `return false`。
+**不是**在官方 exe 上二进制打补丁，而是：
 
-## 可选：本地编译（非必须）
+```text
+官方源码 tag
+  → 打 no-ads 源码补丁
+  → Windows CI 编译 Release
+  → 打成 portable zip 挂到 Release
+```
 
-CI **不编**安装包。若你自己要可执行文件：
+## 自动流水线
+
+```text
+每 6 小时 / 手动
+  auto-follow
+    ├─ 有新官方版本且补丁 OK（或自动 heal）
+    │    → 更新 pin + tag + Release 说明
+    │    → 触发 build-windows
+    │         → 编译 → tportable-x64-noads-*.zip
+    └─ 无法 heal → 开 Issue
+```
+
+## 一次性配置（只需一次）
+
+### 1. 仓库 Secrets（强烈建议）
+
+GitHub → **Settings → Secrets and variables → Actions** 添加：
+
+| Name | 值 |
+|------|-----|
+| `TDESKTOP_API_ID` | 你的 [api_id](https://my.telegram.org/apps) |
+| `TDESKTOP_API_HASH` | 你的 api_hash |
+
+不配也能编，但会用 Telegram **公开测试 API**（共用、可能限流）。  
+**私人使用务必配自己的。**
+
+### 2. 打开 Actions
+
+确保 Actions 已启用。私有仓库注意每月分钟数额度。
+
+### 3. 手动跑第一次编译
+
+**Actions → build-windows → Run workflow**
+
+首次会拉依赖/Qt，可能要 **1～3 小时**。成功后到：
+
+**Releases → 对应 tag → 下载 zip**
+
+解压后运行 `Telegram.exe`（旁有 `portable` 文件，数据在 `tdata/`）。
+
+## 日常
+
+不用操作。官方发新版后，仓库会自动：
+
+1. 更新 pin  
+2. 编译新便携包  
+3. 挂到 Release  
+
+## 本地（可选，一般不需要）
 
 ```bash
 python cli/tdesktop_noads.py prepare --tag v7.0.3
-# 再按官方文档编译 work/src
+# 再按官方 building-win.md 编译
 ```
 
-- Windows 构建说明：https://github.com/telegramdesktop/tdesktop/blob/dev/docs/building-win.md  
-- API：https://core.telegram.org/api/obtaining_api_id  
+## 风险说明
 
-## 声明
-
-客户端侧隐藏 Sponsored Messages ≠ 官方 Premium。  
-自编译客户端有账号风险，自行判断。
+- 非官方客户端，账号风险自负  
+- 只是客户端隐藏 Sponsored Messages，**不是** Premium  
+- 自编译未签名，Windows SmartScreen 可能警告  
 
 ## License
 
-上游代码遵循 Telegram Desktop 许可。本仓库脚本按 MIT 使用即可。
+上游代码遵循 Telegram Desktop 许可。本仓库脚本/workflow 可按 MIT 使用。

@@ -1,0 +1,306 @@
+# Build a Windows x64 portable zip from official tdesktop source + no-ads patch.
+# Based on telegramdesktop/tdesktop .github/workflows/win.yml (simplified: x64 Release only).
+#
+# Prerequisites (repo Secrets, recommended):
+#   TDESKTOP_API_ID
+#   TDESKTOP_API_HASH
+# If missing, falls back to Telegram's public test credentials (shared/rate-limited).
+#
+# Output:
+#   Release asset: tportable-x64-noads-<version>.zip
+#   Contains Telegram.exe (+ Updater.exe if built) and a portable marker.
+
+name: build-windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream tag (empty = versions/current.json)"
+        required: false
+        default: ""
+  workflow_call:
+    inputs:
+      tag:
+        description: "Upstream tag"
+        type: string
+        required: false
+        default: ""
+  # After pin updates
+  push:
+    branches: [main]
+    paths:
+      - "versions/current.json"
+      - "patches/**"
+      - ".github/workflows/build-windows.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-windows
+  cancel-in-progress: false
+
+jobs:
+  windows-x64:
+    name: Windows x64 portable
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    env:
+      UPLOAD_ARTIFACT: "true"
+      ONLY_CACHE: "false"
+      PREPARE_PATH: "Telegram/build/prepare/prepare.py"
+      ARCH: x64
+
+    defaults:
+      run:
+        shell: cmd
+
+    steps:
+      - name: Checkout patch repo
+        uses: actions/checkout@v4
+        with:
+          path: noads
+          fetch-depth: 0
+
+      - name: Resolve tag + API credentials
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          INPUT_TAG="${{ inputs.tag || github.event.inputs.tag || '' }}"
+          if [[ -n "$INPUT_TAG" ]]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG=$(python -c "import json; print(json.load(open('noads/versions/current.json'))['tag'])")
+          fi
+          if [[ ! "$TAG" =~ ^v ]]; then TAG="v$TAG"; fi
+          VER="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag: $TAG"
+
+          API_ID="${{ secrets.TDESKTOP_API_ID }}"
+          API_HASH="${{ secrets.TDESKTOP_API_HASH }}"
+          API_SOURCE="secrets"
+          if [[ -z "$API_ID" || -z "$API_HASH" ]]; then
+            # Telegram public test credentials (same as official nightly CI fallback)
+            API_ID="611335"
+            API_HASH="d524b414d21f4d37f08684c1df41ac9c"
+            API_SOURCE="test"
+            echo "::warning::TDESKTOP_API_ID/HASH secrets not set; using public test API credentials."
+          fi
+          echo "api_id=$API_ID" >> "$GITHUB_OUTPUT"
+          echo "api_hash=$API_HASH" >> "$GITHUB_OUTPUT"
+          echo "api_source=$API_SOURCE" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare directories
+        run: |
+          mkdir %userprofile%\TBuild\Libraries
+          mklink /d %GITHUB_WORKSPACE%\TBuild %userprofile%\TBuild
+          echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>%GITHUB_ENV%
+          echo LibrariesPath=%GITHUB_WORKSPACE%\TBuild\Libraries\win64>>%GITHUB_ENV%
+
+      - name: Clone official tdesktop @ tag
+        uses: actions/checkout@v4
+        with:
+          repository: telegramdesktop/tdesktop
+          ref: ${{ steps.meta.outputs.tag }}
+          submodules: recursive
+          path: ${{ env.TBUILD }}/tdesktop
+
+      - name: Apply no-ads patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python "$GITHUB_WORKSPACE/noads/scripts/apply_noads_patch.py" \
+            --src "$TBUILD/tdesktop" \
+            --patch "$GITHUB_WORKSPACE/noads/patches/0001-no-sponsored-messages.patch" \
+            --cli "$GITHUB_WORKSPACE/noads/cli/tdesktop_noads.py" \
+            --heal-on-fail
+          grep -n "return false" "$TBUILD/tdesktop/Telegram/SourceFiles/data/components/sponsored_messages.cpp" | head
+
+      - name: First set up
+        shell: bash
+        run: |
+          set -euo pipefail
+          DOCPATH=$TBUILD/tdesktop/docs/building-win.md
+          SDK="$(grep "SDK version" "$DOCPATH" | sed -r 's/.*\*\*(.*)\*\* SDK version.*/\1/')"
+          echo "SDK=$SDK" >> "$GITHUB_ENV"
+          echo "SDK=$SDK"
+
+          # same cmake tweak as upstream CI
+          if ls "$PROGRAMFILES"/CMake/share/cmake*/Modules/Platform/Windows-MSVC.cmake >/dev/null 2>&1; then
+            sed -i '/CMAKE_${lang}_FLAGS_DEBUG_INIT/s/${_Zi}//' "$PROGRAMFILES"/CMake/share/cmake*/Modules/Platform/Windows-MSVC.cmake || true
+          fi
+
+          echo "$(sha256sum $TBUILD/tdesktop/$PREPARE_PATH | awk '{ print $1 }')" > CACHE_KEY.txt
+          echo "$SDK" >> CACHE_KEY.txt
+          echo "${{ steps.meta.outputs.tag }}" >> CACHE_KEY.txt
+          echo "CACHE_KEY=$(sha256sum CACHE_KEY.txt | awk '{ print $1 }')" >> "$GITHUB_ENV"
+
+          git config --global user.email "ci@tdesktop-noads"
+          git config --global user.name "tdesktop-noads-ci"
+
+      - name: Native Tools Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+          sdk: ${{ env.SDK }}
+          # Prefer Win7-capable toolset used by upstream; fall back if runner lacks it.
+          toolset: 14.44
+
+      - name: NuGet sources
+        run: |
+          nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
+          nuget sources Add -Source https://api.nuget.org/v3/index.json & exit 0
+
+      - name: ThirdParty cache
+        id: cache-third-party
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TBUILD }}\ThirdParty
+          key: win-third-party-${{ env.CACHE_KEY }}
+          restore-keys: |
+            win-third-party-
+
+      - name: Libraries cache
+        id: cache-libs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\*
+            !${{ env.LibrariesPath }}\cache_keys
+            !${{ env.LibrariesPath }}\[qQ]t[_-]*
+            ${{ env.LibrariesPath }}\cache_keys\*
+            !${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
+          key: win-x64-libs-${{ env.CACHE_KEY }}
+          restore-keys: |
+            win-x64-libs-
+
+      - name: Qt cache
+        id: cache-qt
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\[qQ]t[_-]*
+            ${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
+          key: win-x64-qt-${{ env.CACHE_KEY }}
+          restore-keys: |
+            win-x64-qt-
+
+      - name: Prepare libraries
+        run: |
+          %TBUILD%\tdesktop\Telegram\build\prepare\win.bat skip-release silent
+
+      - name: Free disk space
+        shell: bash
+        run: |
+          find "$LibrariesPath" '(' '(' ! '(' -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' ')' -type f ')' -o -empty ')' -delete || true
+
+      - name: Configure + build Release
+        run: |
+          cd %TBUILD%\tdesktop\Telegram
+          call configure.bat x64 ^
+            -D TDESKTOP_API_ID=${{ steps.meta.outputs.api_id }} ^
+            -D TDESKTOP_API_HASH=${{ steps.meta.outputs.api_hash }} ^
+            -D CMAKE_CONFIGURATION_TYPES=Release ^
+            -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON ^
+            -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON
+          cmake --build ..\out --config Release --parallel
+
+      - name: Package portable zip
+        id: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="${{ steps.meta.outputs.ver }}"
+          OUT="$TBUILD/tdesktop/out/Release"
+          STAGE="$GITHUB_WORKSPACE/portable-stage"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+
+          if [[ ! -f "$OUT/Telegram.exe" ]]; then
+            echo "Telegram.exe not found in $OUT"
+            ls -la "$OUT" || true
+            exit 1
+          fi
+
+          cp "$OUT/Telegram.exe" "$STAGE/"
+          [[ -f "$OUT/Updater.exe" ]] && cp "$OUT/Updater.exe" "$STAGE/" || true
+
+          # Optional extras often present next to the exe
+          for f in modules CrashReports; do
+            [[ -e "$OUT/$f" ]] && cp -a "$OUT/$f" "$STAGE/" || true
+          done
+          find "$OUT" -maxdepth 1 -type f \( -name '*.dll' -o -name '*.pak' -o -name '*.dat' \) -exec cp {} "$STAGE/" \; || true
+
+          # Portable marker: store data next to the executable
+          : > "$STAGE/portable"
+
+          cat > "$STAGE/README-noads.txt" <<EOF
+          tdesktop-noads portable (Windows x64)
+          =====================================
+          Upstream: ${{ steps.meta.outputs.tag }}
+          Patch: disable Sponsored Messages (client-side)
+          API credentials source: ${{ steps.meta.outputs.api_source }}
+
+          Usage:
+            1. Extract this zip anywhere
+            2. Run Telegram.exe
+            3. Account data is stored in the "tdata" folder next to the exe
+
+          Notes:
+            - Not an official Telegram build
+            - Not Premium; only hides sponsored messages in this client
+            - Prefer your own api_id/api_hash via repo Secrets
+          EOF
+
+          ZIP="tportable-x64-noads-${VER}.zip"
+          cd "$STAGE"
+          # powershell Compress-Archive is reliable on GHA windows
+          powershell -NoProfile -Command "Compress-Archive -Path * -DestinationPath '$GITHUB_WORKSPACE/$ZIP' -Force"
+          ls -la "$GITHUB_WORKSPACE/$ZIP"
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "zip_path=$GITHUB_WORKSPACE/$ZIP" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tportable-x64-noads-${{ steps.meta.outputs.ver }}
+          path: ${{ steps.pack.outputs.zip_path }}
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          files: ${{ steps.pack.outputs.zip_path }}
+          fail_on_unmatched_files: true
+          # create release if auto-follow hasn't yet
+          generate_release_notes: false
+          body: |
+            ## tdesktop-noads ${{ steps.meta.outputs.tag }}
+
+            - Upstream: https://github.com/telegramdesktop/tdesktop/releases/tag/${{ steps.meta.outputs.tag }}
+            - Windows portable: `tportable-x64-noads-${{ steps.meta.outputs.ver }}.zip`
+            - Patch: disable Sponsored Messages (client-side)
+            - API: `${{ steps.meta.outputs.api_source }}`
+
+            Extract → run `Telegram.exe`. Data in `tdata/`.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Windows portable build"
+            echo ""
+            echo "- tag: \`${{ steps.meta.outputs.tag }}\`"
+            echo "- zip: \`${{ steps.pack.outputs.zip }}\`"
+            echo "- api: \`${{ steps.meta.outputs.api_source }}\`"
+            echo "- job: **${{ job.status }}**"
+          } >> "$GITHUB_STEP_SUMMARY"

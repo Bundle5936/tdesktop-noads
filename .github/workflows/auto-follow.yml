@@ -6,9 +6,8 @@
 #   3. Download official source, try existing patch
 #   4. If patch fails -> auto-heal (rewrite 3 entry points + regenerate patch)
 #   5. Success -> commit versions/current.json + patch, tag, GitHub Release
-#   6. Heal also fails -> open Issue only (last resort)
-#
-# No Windows binary build. Tracking + validated patch only.
+#   6. Push to versions/current.json triggers build-windows.yml (portable zip)
+#   7. Heal also fails -> open Issue only (last resort)
 
 name: auto-follow
 
