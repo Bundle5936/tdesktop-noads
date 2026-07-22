@@ -204,12 +204,20 @@ jobs:
       - name: Configure + build Release
         run: |
           cd %TBUILD%\tdesktop\Telegram
+          rem Newer CMake on GHA treats unset CMP0218 as error in cmark_gfm.
+          rem Upstream is not yet fixed; suppress policy-as-error for configure.
           call configure.bat x64 ^
+            -Wno-error=policy ^
             -D TDESKTOP_API_ID=${{ steps.meta.outputs.api_id }} ^
             -D TDESKTOP_API_HASH=${{ steps.meta.outputs.api_hash }} ^
             -D CMAKE_CONFIGURATION_TYPES=Release ^
             -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON ^
             -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON
+          if errorlevel 1 exit /b 1
+          if not exist ..\out\ALL_BUILD.vcxproj (
+            echo Configure failed: ALL_BUILD.vcxproj missing
+            exit /b 1
+          )
           cmake --build ..\out --config Release --parallel
 
       - name: Package portable zip
