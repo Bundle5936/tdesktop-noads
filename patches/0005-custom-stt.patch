@@ -20,15 +20,17 @@
 +} // namespace Api
 --- a/Telegram/SourceFiles/api/api_custom_transcribe.cpp
 +++ b/Telegram/SourceFiles/api/api_custom_transcribe.cpp
-@@ -0,0 +1,222 @@
+@@ -0,0 +1,279 @@
 +/*
 +This file is part of tdesktop-noads patches for Telegram Desktop.
 +*/
 +#include "api/api_custom_transcribe.h"
 +
 +#include "base/timer.h"
++#include "base/weak_ptr.h"
 +#include "data/data_document.h"
 +#include "data/data_document_media.h"
++#include "data/data_file_origin.h"
 +#include "data/data_session.h"
 +#include "history/history_item.h"
 +#include "main/main_session.h"
@@ -36,11 +38,12 @@
 +
 +#include <QtCore/QFile>
 +#include <QtCore/QFileInfo>
-+#include <QtCore/QHttpMultiPart>
-+#include <QtCore/QHttpPart>
 +#include <QtCore/QJsonDocument>
 +#include <QtCore/QJsonObject>
 +#include <QtCore/QJsonParseError>
++#include <QtCore/QTimer>
++#include <QtNetwork/QHttpMultiPart>
++#include <QtNetwork/QHttpPart>
 +#include <QtNetwork/QNetworkAccessManager>
 +#include <QtNetwork/QNetworkReply>
 +#include <QtNetwork/QNetworkRequest>
@@ -82,13 +85,21 @@
 +	if (!path.isEmpty()) {
 +		return QFileInfo(path).fileName();
 +	}
-+	if (document->isVoiceMessage() || document->isVideoMessage()) {
++	if (document->isVideoMessage()) {
++		return u"video-note.mp4"_q;
++	} else if (document->isVoiceMessage()) {
 +		return u"voice.ogg"_q;
 +	}
 +	return u"audio.bin"_q;
 +}
 +
-+[[nodiscard]] QString GuessMime(const QString &filename) {
++[[nodiscard]] QString GuessMime(
++		not_null<DocumentData*> document,
++		const QString &filename) {
++	const auto declared = document->mimeString().trimmed();
++	if (!declared.isEmpty()) {
++		return declared;
++	}
 +	const auto lower = filename.toLower();
 +	if (lower.endsWith(u".ogg"_q) || lower.endsWith(u".opus"_q)) {
 +		return u"audio/ogg"_q;
@@ -107,8 +118,10 @@
 +void UploadBytes(
 +		QByteArray bytes,
 +		QString filename,
++		QString mime,
 +		Fn<void(QString text, bool failed)> done) {
-+	if (bytes.isEmpty()) {
++	constexpr auto kMaxUploadBytes = 24 * 1024 * 1024;
++	if (bytes.isEmpty() || bytes.size() > kMaxUploadBytes) {
 +		done({}, true);
 +		return;
 +	}
@@ -134,7 +147,7 @@
 +					filename)));
 +		filePart.setHeader(
 +			QNetworkRequest::ContentTypeHeader,
-+			QVariant(GuessMime(filename)));
++			QVariant(mime));
 +		filePart.setBody(bytes);
 +		multi->append(filePart);
 +	}
@@ -143,8 +156,13 @@
 +	req.setRawHeader("Authorization", ("Bearer " + key).toUtf8());
 +	const auto reply = Network().post(req, multi);
 +	multi->setParent(reply);
++	QTimer::singleShot(60 * 1000, reply, [=] {
++		if (reply->isRunning()) {
++			reply->abort();
++		}
++	});
 +
-+	QObject::connect(reply, &QNetworkReply::finished, [=] {
++	QObject::connect(reply, &QNetworkReply::finished, reply, [=] {
 +		QString text;
 +		bool failed = true;
 +		if (reply->error() == QNetworkReply::NoError) {
@@ -165,38 +183,63 @@
 +}
 +
 +void WaitLoadedThenUpload(
-+		not_null<DocumentData*> document,
++		base::weak_ptr<Main::Session> session,
++		DocumentId documentId,
 +		std::shared_ptr<Data::DocumentMedia> media,
 +		Fn<void(QString, bool)> done) {
-+	// Keep media alive while polling.
 +	struct State {
++		std::shared_ptr<State> keepAlive;
 +		std::shared_ptr<Data::DocumentMedia> media;
++		base::weak_ptr<Main::Session> session;
++		DocumentId documentId = 0;
 +		base::Timer timer;
 +		int tries = 0;
 +		Fn<void(QString, bool)> done;
-+		DocumentData *document = nullptr;
 +	};
 +	const auto state = std::make_shared<State>();
++	state->keepAlive = state;
 +	state->media = std::move(media);
++	state->session = std::move(session);
++	state->documentId = documentId;
 +	state->done = std::move(done);
-+	state->document = document;
 +
-+	const auto tick = [=] {
-+		const auto bytes = ReadAudioBytes(state->document, state->media);
++	state->timer.setCallback([weak = std::weak_ptr<State>(state)] {
++		const auto state = weak.lock();
++		if (!state) {
++			return;
++		}
++		const auto session = state->session.get();
++		if (!session) {
++			state->timer.cancel();
++			auto done = std::move(state->done);
++			state->keepAlive.reset();
++			done({}, true);
++			return;
++		}
++		const auto document = session->data().document(state->documentId);
++		const auto bytes = ReadAudioBytes(document, state->media);
 +		if (!bytes.isEmpty()) {
 +			state->timer.cancel();
-+			UploadBytes(bytes, GuessFilename(state->document), state->done);
++			auto done = std::move(state->done);
++			state->keepAlive.reset();
++			const auto filename = GuessFilename(document);
++			UploadBytes(
++				bytes,
++				filename,
++				GuessMime(document, filename),
++				std::move(done));
 +			return;
 +		}
 +		++state->tries;
 +		if (state->tries > 200) { // ~20s
 +			state->timer.cancel();
-+			state->done({}, true);
++			auto done = std::move(state->done);
++			state->keepAlive.reset();
++			done({}, true);
 +			return;
 +		}
 +		state->timer.callOnce(100);
-+	};
-+	state->timer.setCallback(tick);
++	});
 +	state->timer.callOnce(100);
 +}
 +
@@ -204,14 +247,28 @@
 +		not_null<HistoryItem*> item,
 +		not_null<DocumentData*> document,
 +		Fn<void(QString, bool)> done) {
++	constexpr auto kMaxUploadBytes = 24 * 1024 * 1024;
++	if (document->size > kMaxUploadBytes) {
++		done({}, true);
++		return;
++	}
 +	auto media = document->createMediaView();
 +	const auto bytes = ReadAudioBytes(document, media);
 +	if (!bytes.isEmpty()) {
-+		UploadBytes(bytes, GuessFilename(document), std::move(done));
++		const auto filename = GuessFilename(document);
++		UploadBytes(
++			bytes,
++			filename,
++			GuessMime(document, filename),
++			std::move(done));
 +		return;
 +	}
 +	document->save(item->fullId(), QString());
-+	WaitLoadedThenUpload(document, std::move(media), std::move(done));
++	WaitLoadedThenUpload(
++		base::make_weak(&document->session()),
++		document->id,
++		std::move(media),
++		std::move(done));
 +}
 +
 +} // namespace
@@ -243,6 +300,34 @@
 +}
 +
 +} // namespace Api
+--- a/Telegram/SourceFiles/api/api_transcribes.h
++++ b/Telegram/SourceFiles/api/api_transcribes.h
+@@ -8,6 +8,7 @@
+ #pragma once
+ 
+ #include "mtproto/sender.h"
++#include "base/weak_ptr.h"
+ #include "spellcheck/spellcheck_types.h"
+ 
+ class ApiWrap;
+@@ -27,7 +28,7 @@
+ 	mtpRequestId requestId = 0;
+ };
+ 
+-class Transcribes final {
++class Transcribes final : public base::has_weak_ptr {
+ public:
+ 	explicit Transcribes(not_null<ApiWrap*> api);
+ 
+@@ -61,7 +62,7 @@
+ 	[[nodiscard]] crl::time trialsMaxLengthMs() const;
+ 
+ private:
+-	void load(not_null<HistoryItem*> item);
++	void load(not_null<HistoryItem*> item, bool custom = true);
+ 	void summarize(not_null<HistoryItem*> item);
+ 
+ 	const not_null<Main::Session*> _session;
 --- a/Telegram/SourceFiles/api/api_transcribes.cpp
 +++ b/Telegram/SourceFiles/api/api_transcribes.cpp
 @@ -21,6 +21,7 @@
@@ -253,32 +338,55 @@
  
  namespace Api {
  
-@@ -185,6 +186,31 @@
+@@ -170,7 +171,9 @@
+ 	}
+ }
+ 
+-void Transcribes::load(not_null<HistoryItem*> item) {
++void Transcribes::load(
++		not_null<HistoryItem*> item,
++		bool custom) {
+ 	if (!item->isHistoryEntry() || item->isLocal()) {
+ 		return;
+ 	}
+@@ -185,6 +188,43 @@
  		}
  	};
  	const auto id = item->fullId();
-+	if (CustomTranscribeReady()) {
++	if (custom && CustomTranscribeReady()) {
 +		auto &entry = _map.emplace(id).first->second;
 +		entry.requestId = 1; // non-zero => loading
 +		entry.shown = true;
 +		entry.failed = false;
 +		entry.pending = true;
 +		entry.result = QString();
++		const auto weak = base::make_weak(this);
 +		const auto ok = TryCustomTranscribe(item, [=](QString text, bool failed) {
-+			auto &entry = _map[id];
++			if (!weak) {
++				return;
++			}
++			if (failed || text.isEmpty()) {
++				if (const auto current = weak->_session->data().message(id)) {
++					weak->load(current, false);
++				} else {
++					weak->_map.erase(id);
++				}
++				return;
++			}
++			auto &entry = weak->_map[id];
 +			entry.requestId = 0;
 +			entry.pending = false;
-+			entry.failed = failed || text.isEmpty();
-+			entry.result = failed ? QString() : text;
-+			if (const auto current = _session->data().message(id)) {
++			entry.failed = false;
++			entry.result = text;
++			if (const auto current = weak->_session->data().message(id)) {
 +				toggleRound(current, entry);
-+				_session->data().requestItemResize(current);
++				weak->_session->data().requestItemResize(current);
 +			}
 +		});
 +		if (ok) {
 +			return;
 +		}
-+		// fall through to official API
++		// Unsupported media falls through to the official API.
 +		entry.requestId = 0;
 +		entry.pending = false;
 +	}

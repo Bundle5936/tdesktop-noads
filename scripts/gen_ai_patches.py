@@ -3,15 +3,16 @@
 
 from __future__ import annotations
 
+import argparse
 import difflib
 import urllib.request
 from pathlib import Path
 
-TAG = "v7.0.4"
+DEFAULT_TAG = "v7.0.4"
 UA = {"User-Agent": "tdesktop-noads"}
 ROOT = Path(__file__).resolve().parents[1]
 PATCHES = ROOT / "patches"
-BASE = f"https://raw.githubusercontent.com/telegramdesktop/tdesktop/{TAG}/"
+BASE = ""
 
 
 def fetch(rel: str) -> str:
@@ -44,6 +45,8 @@ This file is part of tdesktop-noads patches for Telegram Desktop.
 #pragma once
 
 #include "base/options.h"
+
+#include <QtCore/QUrl>
 
 namespace NoAds {
 namespace Ai {
@@ -126,17 +129,34 @@ inline constexpr auto kSttModel = "noads-stt-model";
 	return v.isEmpty() ? DefaultSttModel() : v;
 }
 
+[[nodiscard]] inline bool EndpointAllowed(const QString &base) {
+	const auto url = QUrl(base);
+	if (!url.isValid() || url.host().isEmpty()) {
+		return false;
+	}
+	if (url.scheme().compare(u"https"_q, Qt::CaseInsensitive) == 0) {
+		return true;
+	}
+	if (url.scheme().compare(u"http"_q, Qt::CaseInsensitive) != 0) {
+		return false;
+	}
+	const auto host = url.host().toLower();
+	return host == u"localhost"_q
+		|| host == u"127.0.0.1"_q
+		|| host == u"::1"_q;
+}
+
 [[nodiscard]] inline bool TranslateReady() {
 	return TranslateEnabled()
 		&& !TranslateApiKey().isEmpty()
-		&& !TranslateBaseUrl().isEmpty()
+		&& EndpointAllowed(TranslateBaseUrl())
 		&& !TranslateModel().isEmpty();
 }
 
 [[nodiscard]] inline bool SttReady() {
 	return SttEnabled()
 		&& !SttApiKey().isEmpty()
-		&& !SttBaseUrl().isEmpty()
+		&& EndpointAllowed(SttBaseUrl())
 		&& !SttModel().isEmpty();
 }
 
@@ -251,11 +271,13 @@ This file is part of tdesktop-noads patches for Telegram Desktop.
 
 namespace Ui {
 
-[[nodiscard]] std::unique_ptr<TranslateProvider> CreateLlmTranslateProvider();
+[[nodiscard]] std::unique_ptr<TranslateProvider> CreateLlmTranslateProvider(
+	std::unique_ptr<TranslateProvider> fallback);
 
 } // namespace Ui
 '''
 
+# Final provider implementation used by the generated patch.
 LLM_CPP = r'''/*
 This file is part of tdesktop-noads patches for Telegram Desktop.
 */
@@ -267,6 +289,7 @@ This file is part of tdesktop-noads patches for Telegram Desktop.
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
 #include <QtCore/QJsonParseError>
+#include <QtCore/QTimer>
 #include <QtNetwork/QNetworkAccessManager>
 #include <QtNetwork/QNetworkReply>
 #include <QtNetwork/QNetworkRequest>
@@ -276,170 +299,30 @@ namespace {
 
 class LlmTranslateProvider final : public TranslateProvider {
 public:
-	LlmTranslateProvider() {
+	explicit LlmTranslateProvider(
+			std::unique_ptr<TranslateProvider> fallback)
+	: _fallback(std::move(fallback)) {
 		NoAds::Ai::RegisterOptions();
 	}
 
 	[[nodiscard]] bool supportsMessageId() const override {
-		return false;
+		return NoAds::Ai::TranslateReady()
+			? false
+			: _fallback->supportsMessageId();
 	}
 
 	void request(
 			TranslateProviderRequest request,
 			LanguageId to,
 			Fn<void(TranslateProviderResult)> done) override {
-		if (request.text.text.trimmed().isEmpty()) {
-			done({ .error = TranslateProviderError::Unknown });
-			return;
-		}
 		if (!NoAds::Ai::TranslateReady()) {
-			done({ .error = TranslateProviderError::Unknown });
+			_fallback->request(
+				std::move(request),
+				to,
+				std::move(done));
 			return;
 		}
-
-		const auto base = NoAds::Ai::TranslateBaseUrl();
-		const auto key = NoAds::Ai::TranslateApiKey();
-		const auto model = NoAds::Ai::TranslateModel();
-		const auto toCode = to.twoLetterCode();
-		const auto prompt = NoAds::Ai::SystemPrompt();
-
-		auto system = prompt;
-		if (!toCode.isEmpty()) {
-			system += u"\nTarget language code: "_q + toCode + u"."_q;
-		}
-
-		auto messages = QJsonArray();
-		messages.append(QJsonObject{
-			{ u"role"_q, u"system"_q },
-			{ u"content"_q, system },
-		});
-		messages.append(QJsonObject{
-			{ u"role"_q, u"user"_q },
-			{ u"content"_q, request.text.text },
-		});
-		const auto body = QJsonDocument(QJsonObject{
-			{ u"model"_q, model },
-			{ u"temperature"_q, 0.2 },
-			{ u"messages"_q, messages },
-		}).toJson(QJsonDocument::Compact);
-
-		auto net = QNetworkRequest(QUrl(base + u"/chat/completions"_q));
-		net.setHeader(
-			QNetworkRequest::ContentTypeHeader,
-			u"application/json"_q);
-		net.setRawHeader(
-			"Authorization",
-			("Bearer " + key).toUtf8());
-
-		const auto reply = _network.post(net, body);
-		QObject::connect(reply, &QNetworkReply::finished, [=] {
-			auto result = TranslateProviderResult();
-			const auto guard = gsl::finally([=] { reply->deleteLater(); });
-			if (reply->error() != QNetworkReply::NoError) {
-				result.error = TranslateProviderError::Unknown;
-				done(std::move(result));
-				return;
-			}
-			auto parseError = QJsonParseError();
-			const auto doc = QJsonDocument::fromJson(
-				reply->readAll(),
-				&parseError);
-			if (parseError.error != QJsonParseError::NoError
-				|| !doc.isObject()) {
-				result.error = TranslateProviderError::Unknown;
-				done(std::move(result));
-				return;
-			}
-			const auto choices = doc.object().value(u"choices"_q).toArray();
-			if (choices.isEmpty()) {
-				result.error = TranslateProviderError::Unknown;
-				done(std::move(result));
-				return;
-			}
-			const auto msg = choices.at(0).toObject().value(u"message"_q).toObject();
-			auto content = msg.value(u"content"_q).toString().trimmed();
-			// Some models wrap content in an array of parts.
-			if (content.isEmpty() && msg.value(u"content"_q).isArray()) {
-				const auto parts = msg.value(u"content"_q).toArray();
-				for (const auto &part : parts) {
-					if (part.isString()) {
-						content += part.toString();
-					} else if (part.isObject()) {
-						content += part.toObject().value(u"text"_q).toString();
-					}
-				}
-				content = content.trimmed();
-			}
-			if (content.isEmpty()) {
-				result.error = TranslateProviderError::Unknown;
-				done(std::move(result));
-				return;
-			}
-			result.text = TextWithEntities{ content };
-			done(std::move(result));
-		});
-	}
-
-private:
-	QNetworkAccessManager _network;
-
-};
-
-} // namespace
-
-std::unique_ptr<TranslateProvider> CreateLlmTranslateProvider() {
-	return std::make_unique<LlmTranslateProvider>();
-}
-
-} // namespace Ui
-'''
-
-# Fix gsl::finally - tdesktop may use differently. Use simpler deleteLater only.
-LLM_CPP = LLM_CPP.replace(
-	"const auto guard = gsl::finally([=] { reply->deleteLater(); });\n\t\t\t",
-	"",
-).replace(
-	"done(std::move(result));\n\t\t\t\treturn;\n\t\t\t}\n\t\t\tauto parseError",
-	"done(std::move(result));\n\t\t\t\treply->deleteLater();\n\t\t\t\treturn;\n\t\t\t}\n\t\t\tauto parseError",
-)
-# ensure all return paths deleteLater - rewrite finished lambda more carefully
-LLM_CPP = r'''/*
-This file is part of tdesktop-noads patches for Telegram Desktop.
-*/
-#include "lang/translate_llm_provider.h"
-
-#include "noads/noads_ai_options.h"
-
-#include <QtCore/QJsonArray>
-#include <QtCore/QJsonDocument>
-#include <QtCore/QJsonObject>
-#include <QtCore/QJsonParseError>
-#include <QtNetwork/QNetworkAccessManager>
-#include <QtNetwork/QNetworkReply>
-#include <QtNetwork/QNetworkRequest>
-
-namespace Ui {
-namespace {
-
-class LlmTranslateProvider final : public TranslateProvider {
-public:
-	LlmTranslateProvider() {
-		NoAds::Ai::RegisterOptions();
-	}
-
-	[[nodiscard]] bool supportsMessageId() const override {
-		return false;
-	}
-
-	void request(
-			TranslateProviderRequest request,
-			LanguageId to,
-			Fn<void(TranslateProviderResult)> done) override {
 		if (request.text.text.trimmed().isEmpty()) {
-			done({ .error = TranslateProviderError::Unknown });
-			return;
-		}
-		if (!NoAds::Ai::TranslateReady()) {
 			done({ .error = TranslateProviderError::Unknown });
 			return;
 		}
@@ -475,7 +358,12 @@ public:
 		net.setRawHeader("Authorization", ("Bearer " + key).toUtf8());
 
 		const auto reply = _network.post(net, body);
-		QObject::connect(reply, &QNetworkReply::finished, [=] {
+		QTimer::singleShot(60 * 1000, reply, [=] {
+			if (reply->isRunning()) {
+				reply->abort();
+			}
+		});
+		QObject::connect(reply, &QNetworkReply::finished, reply, [=] {
 			auto finish = [&](TranslateProviderResult result) {
 				done(std::move(result));
 				reply->deleteLater();
@@ -520,14 +408,16 @@ public:
 	}
 
 private:
+	std::unique_ptr<TranslateProvider> _fallback;
 	QNetworkAccessManager _network;
 
 };
 
 } // namespace
 
-std::unique_ptr<TranslateProvider> CreateLlmTranslateProvider() {
-	return std::make_unique<LlmTranslateProvider>();
+std::unique_ptr<TranslateProvider> CreateLlmTranslateProvider(
+		std::unique_ptr<TranslateProvider> fallback) {
+	return std::make_unique<LlmTranslateProvider>(std::move(fallback));
 }
 
 } // namespace Ui
@@ -556,324 +446,17 @@ bool TryCustomTranscribe(
 } // namespace Api
 '''
 
-STT_CPP = r'''/*
-This file is part of tdesktop-noads patches for Telegram Desktop.
-*/
-#include "api/api_custom_transcribe.h"
-
-#include "data/data_document.h"
-#include "data/data_document_media.h"
-#include "data/data_file_origin.h"
-#include "data/data_session.h"
-#include "history/history.h"
-#include "history/history_item.h"
-#include "main/main_session.h"
-#include "noads/noads_ai_options.h"
-
-#include <QtCore/QFile>
-#include <QtCore/QFileInfo>
-#include <QtCore/QHttpMultiPart>
-#include <QtCore/QHttpPart>
-#include <QtCore/QJsonDocument>
-#include <QtCore/QJsonObject>
-#include <QtCore/QJsonParseError>
-#include <QtNetwork/QNetworkAccessManager>
-#include <QtNetwork/QNetworkReply>
-#include <QtNetwork/QNetworkRequest>
-
-namespace Api {
-namespace {
-
-struct Pending {
-	std::shared_ptr<Data::DocumentMedia> media;
-	QMetaObject::Connection connection;
-	Fn<void(QString, bool)> done;
-};
-
-QNetworkAccessManager &Network() {
-	static QNetworkAccessManager instance;
-	return instance;
-}
-
-[[nodiscard]] QByteArray ReadAudioBytes(
-		not_null<DocumentData*> document,
-		const std::shared_ptr<Data::DocumentMedia> &media) {
-	if (media) {
-		const auto bytes = media->bytes();
-		if (!bytes.isEmpty()) {
-			return bytes;
-		}
-	}
-	const auto path = document->filepath(true);
-	if (path.isEmpty()) {
-		return {};
-	}
-	auto f = QFile(path);
-	if (!f.open(QIODevice::ReadOnly)) {
-		return {};
-	}
-	return f.readAll();
-}
-
-[[nodiscard]] QString GuessFilename(not_null<DocumentData*> document) {
-	auto name = document->filename();
-	if (!name.isEmpty()) {
-		return name;
-	}
-	const auto path = document->filepath(true);
-	if (!path.isEmpty()) {
-		return QFileInfo(path).fileName();
-	}
-	if (document->isVoiceMessage() || document->isVideoMessage()) {
-		return u"voice.ogg"_q;
-	}
-	return u"audio.bin"_q;
-}
-
-[[nodiscard]] QString GuessMime(const QString &filename) {
-	const auto lower = filename.toLower();
-	if (lower.endsWith(u".ogg"_q) || lower.endsWith(u".opus"_q)) {
-		return u"audio/ogg"_q;
-	} else if (lower.endsWith(u".mp3"_q)) {
-		return u"audio/mpeg"_q;
-	} else if (lower.endsWith(u".wav"_q)) {
-		return u"audio/wav"_q;
-	} else if (lower.endsWith(u".m4a"_q) || lower.endsWith(u".mp4"_q)) {
-		return u"audio/mp4"_q;
-	} else if (lower.endsWith(u".webm"_q)) {
-		return u"audio/webm"_q;
-	}
-	return u"application/octet-stream"_q;
-}
-
-void UploadBytes(
-		const QByteArray &bytes,
-		const QString &filename,
-		Fn<void(QString text, bool failed)> done) {
-	if (bytes.isEmpty()) {
-		done({}, true);
-		return;
-	}
-	const auto base = NoAds::Ai::SttBaseUrl();
-	const auto key = NoAds::Ai::SttApiKey();
-	const auto model = NoAds::Ai::SttModel();
-
-	const auto multi = new QHttpMultiPart(QHttpMultiPart::FormDataType);
-
-	{
-		QHttpPart modelPart;
-		modelPart.setHeader(
-			QNetworkRequest::ContentDispositionHeader,
-			QVariant(u"form-data; name=\"model\""_q));
-		modelPart.setBody(model.toUtf8());
-		multi->append(modelPart);
-	}
-	{
-		QHttpPart filePart;
-		filePart.setHeader(
-			QNetworkRequest::ContentDispositionHeader,
-			QVariant(
-				u"form-data; name=\"file\"; filename=\"%1\""_q.arg(filename)));
-		filePart.setHeader(
-			QNetworkRequest::ContentTypeHeader,
-			QVariant(GuessMime(filename)));
-		filePart.setBody(bytes);
-		multi->append(filePart);
-	}
-
-	auto req = QNetworkRequest(QUrl(base + u"/audio/transcriptions"_q));
-	req.setRawHeader("Authorization", ("Bearer " + key).toUtf8());
-
-	const auto reply = Network().post(req, multi);
-	multi->setParent(reply);
-
-	QObject::connect(reply, &QNetworkReply::finished, [=] {
-		auto text = QString();
-		auto failed = true;
-		if (reply->error() == QNetworkReply::NoError) {
-			auto err = QJsonParseError();
-			const auto doc = QJsonDocument::fromJson(reply->readAll(), &err);
-			if (err.error == QJsonParseError::NoError && doc.isObject()) {
-				text = doc.object().value(u"text"_q).toString().trimmed();
-				failed = text.isEmpty();
-			} else {
-				// plain text fallback
-				const auto raw = QString::fromUtf8(reply->readAll()).trimmed();
-				// already consumed body above - use parse path only
-				failed = true;
-			}
-		}
-		// re-read not possible; fix by storing body once
-		done(text, failed);
-		reply->deleteLater();
-	});
-}
-
-// Fixed upload with single body read
-void UploadBytesFixed(
-		QByteArray bytes,
-		QString filename,
-		Fn<void(QString text, bool failed)> done) {
-	if (bytes.isEmpty()) {
-		done({}, true);
-		return;
-	}
-	const auto base = NoAds::Ai::SttBaseUrl();
-	const auto key = NoAds::Ai::SttApiKey();
-	const auto model = NoAds::Ai::SttModel();
-
-	const auto multi = new QHttpMultiPart(QHttpMultiPart::FormDataType);
-	{
-		QHttpPart modelPart;
-		modelPart.setHeader(
-			QNetworkRequest::ContentDispositionHeader,
-			QVariant(u"form-data; name=\"model\""_q));
-		modelPart.setBody(model.toUtf8());
-		multi->append(modelPart);
-	}
-	{
-		QHttpPart filePart;
-		filePart.setHeader(
-			QNetworkRequest::ContentDispositionHeader,
-			QVariant(
-				u"form-data; name=\"file\"; filename=\"%1\""_q.arg(filename)));
-		filePart.setHeader(
-			QNetworkRequest::ContentTypeHeader,
-			QVariant(GuessMime(filename)));
-		filePart.setBody(bytes);
-		multi->append(filePart);
-	}
-
-	auto req = QNetworkRequest(QUrl(base + u"/audio/transcriptions"_q));
-	req.setRawHeader("Authorization", ("Bearer " + key).toUtf8());
-	const auto reply = Network().post(req, multi);
-	multi->setParent(reply);
-
-	QObject::connect(reply, &QNetworkReply::finished, [=] {
-		QString text;
-		bool failed = true;
-		if (reply->error() == QNetworkReply::NoError) {
-			const auto body = reply->readAll();
-			auto err = QJsonParseError();
-			const auto doc = QJsonDocument::fromJson(body, &err);
-			if (err.error == QJsonParseError::NoError && doc.isObject()) {
-				text = doc.object().value(u"text"_q).toString().trimmed();
-				failed = text.isEmpty();
-			} else {
-				text = QString::fromUtf8(body).trimmed();
-				failed = text.isEmpty();
-			}
-		}
-		done(text, failed);
-		reply->deleteLater();
-	});
-}
-
-void StartWithDocument(
-		not_null<HistoryItem*> item,
-		not_null<DocumentData*> document,
-		Fn<void(QString, bool)> done) {
-	auto media = document->createMediaView();
-	const auto bytes = ReadAudioBytes(document, media);
-	if (!bytes.isEmpty()) {
-		UploadBytesFixed(bytes, GuessFilename(document), std::move(done));
-		return;
-	}
-
-	// Need download first.
-	document->save(item->fullId(), QString());
-	const auto session = &document->session();
-	const auto docId = document->id;
-	const auto weakItem = base::make_weak(item.get());
-
-	// Use one-shot lifetime object via QObject context on network manager.
-	const auto watcher = new QObject(&Network());
-	const auto connection = QObject::connect(
-		&session->data(),
-		&Data::Session::documentLoadProgress,
-		watcher,
-		[=](not_null<DocumentData*> loaded) {
-			if (loaded->id != docId) {
-				return;
-			}
-			if (!loaded->loaded() && loaded->filepath(true).isEmpty()) {
-				const auto m = loaded->activeMediaView();
-				if (!m || !m->loaded()) {
-					return;
-				}
-			}
-			const auto m = loaded->createMediaView();
-			const auto data = ReadAudioBytes(loaded, m);
-			if (data.isEmpty() && loaded->loading()) {
-				return;
-			}
-			watcher->deleteLater();
-			if (data.isEmpty()) {
-				done({}, true);
-				return;
-			}
-			UploadBytesFixed(data, GuessFilename(loaded), done);
-		});
-	(void)connection;
-
-	// Also try shortly after in case already finishing.
-	QTimer::singleShot(crl::time(50), watcher, [=] {
-		const auto d = session->data().document(docId);
-		if (!d) {
-			return;
-		}
-		const auto m = d->createMediaView();
-		const auto data = ReadAudioBytes(d, m);
-		if (!data.isEmpty()) {
-			watcher->deleteLater();
-			UploadBytesFixed(data, GuessFilename(d), done);
-		}
-	});
-}
-
-} // namespace
-
-bool CustomTranscribeReady() {
-	NoAds::Ai::RegisterOptions();
-	return NoAds::Ai::SttReady();
-}
-
-bool TryCustomTranscribe(
-		not_null<HistoryItem*> item,
-		Fn<void(QString text, bool failed)> done) {
-	NoAds::Ai::RegisterOptions();
-	if (!NoAds::Ai::SttReady()) {
-		return false;
-	}
-	const auto media = item->media();
-	const auto document = media ? media->document() : nullptr;
-	if (!document) {
-		return false;
-	}
-	if (!document->isVoiceMessage()
-		&& !document->isVideoMessage()
-		&& !document->isAudioFile()) {
-		return false;
-	}
-	StartWithDocument(item, document, std::move(done));
-	return true;
-}
-
-} // namespace Api
-'''
-
-# Fix STT_CPP issues: documentLoadProgress signature, loaded(), QTimer, base::make_weak
-# Check documentLoadProgress - it's rpl not signal. Need different approach.
-
-# Simpler STT approach: use rpl lifetime or crl::on_main polling timer
+# Final STT implementation used by the generated patch.
 STT_CPP = r'''/*
 This file is part of tdesktop-noads patches for Telegram Desktop.
 */
 #include "api/api_custom_transcribe.h"
 
 #include "base/timer.h"
+#include "base/weak_ptr.h"
 #include "data/data_document.h"
 #include "data/data_document_media.h"
+#include "data/data_file_origin.h"
 #include "data/data_session.h"
 #include "history/history_item.h"
 #include "main/main_session.h"
@@ -881,11 +464,12 @@ This file is part of tdesktop-noads patches for Telegram Desktop.
 
 #include <QtCore/QFile>
 #include <QtCore/QFileInfo>
-#include <QtCore/QHttpMultiPart>
-#include <QtCore/QHttpPart>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
 #include <QtCore/QJsonParseError>
+#include <QtCore/QTimer>
+#include <QtNetwork/QHttpMultiPart>
+#include <QtNetwork/QHttpPart>
 #include <QtNetwork/QNetworkAccessManager>
 #include <QtNetwork/QNetworkReply>
 #include <QtNetwork/QNetworkRequest>
@@ -927,13 +511,21 @@ QNetworkAccessManager &Network() {
 	if (!path.isEmpty()) {
 		return QFileInfo(path).fileName();
 	}
-	if (document->isVoiceMessage() || document->isVideoMessage()) {
+	if (document->isVideoMessage()) {
+		return u"video-note.mp4"_q;
+	} else if (document->isVoiceMessage()) {
 		return u"voice.ogg"_q;
 	}
 	return u"audio.bin"_q;
 }
 
-[[nodiscard]] QString GuessMime(const QString &filename) {
+[[nodiscard]] QString GuessMime(
+		not_null<DocumentData*> document,
+		const QString &filename) {
+	const auto declared = document->mimeString().trimmed();
+	if (!declared.isEmpty()) {
+		return declared;
+	}
 	const auto lower = filename.toLower();
 	if (lower.endsWith(u".ogg"_q) || lower.endsWith(u".opus"_q)) {
 		return u"audio/ogg"_q;
@@ -952,8 +544,10 @@ QNetworkAccessManager &Network() {
 void UploadBytes(
 		QByteArray bytes,
 		QString filename,
+		QString mime,
 		Fn<void(QString text, bool failed)> done) {
-	if (bytes.isEmpty()) {
+	constexpr auto kMaxUploadBytes = 24 * 1024 * 1024;
+	if (bytes.isEmpty() || bytes.size() > kMaxUploadBytes) {
 		done({}, true);
 		return;
 	}
@@ -979,7 +573,7 @@ void UploadBytes(
 					filename)));
 		filePart.setHeader(
 			QNetworkRequest::ContentTypeHeader,
-			QVariant(GuessMime(filename)));
+			QVariant(mime));
 		filePart.setBody(bytes);
 		multi->append(filePart);
 	}
@@ -988,8 +582,13 @@ void UploadBytes(
 	req.setRawHeader("Authorization", ("Bearer " + key).toUtf8());
 	const auto reply = Network().post(req, multi);
 	multi->setParent(reply);
+	QTimer::singleShot(60 * 1000, reply, [=] {
+		if (reply->isRunning()) {
+			reply->abort();
+		}
+	});
 
-	QObject::connect(reply, &QNetworkReply::finished, [=] {
+	QObject::connect(reply, &QNetworkReply::finished, reply, [=] {
 		QString text;
 		bool failed = true;
 		if (reply->error() == QNetworkReply::NoError) {
@@ -1010,38 +609,63 @@ void UploadBytes(
 }
 
 void WaitLoadedThenUpload(
-		not_null<DocumentData*> document,
+		base::weak_ptr<Main::Session> session,
+		DocumentId documentId,
 		std::shared_ptr<Data::DocumentMedia> media,
 		Fn<void(QString, bool)> done) {
-	// Keep media alive while polling.
 	struct State {
+		std::shared_ptr<State> keepAlive;
 		std::shared_ptr<Data::DocumentMedia> media;
+		base::weak_ptr<Main::Session> session;
+		DocumentId documentId = 0;
 		base::Timer timer;
 		int tries = 0;
 		Fn<void(QString, bool)> done;
-		DocumentData *document = nullptr;
 	};
 	const auto state = std::make_shared<State>();
+	state->keepAlive = state;
 	state->media = std::move(media);
+	state->session = std::move(session);
+	state->documentId = documentId;
 	state->done = std::move(done);
-	state->document = document;
 
-	const auto tick = [=] {
-		const auto bytes = ReadAudioBytes(state->document, state->media);
+	state->timer.setCallback([weak = std::weak_ptr<State>(state)] {
+		const auto state = weak.lock();
+		if (!state) {
+			return;
+		}
+		const auto session = state->session.get();
+		if (!session) {
+			state->timer.cancel();
+			auto done = std::move(state->done);
+			state->keepAlive.reset();
+			done({}, true);
+			return;
+		}
+		const auto document = session->data().document(state->documentId);
+		const auto bytes = ReadAudioBytes(document, state->media);
 		if (!bytes.isEmpty()) {
 			state->timer.cancel();
-			UploadBytes(bytes, GuessFilename(state->document), state->done);
+			auto done = std::move(state->done);
+			state->keepAlive.reset();
+			const auto filename = GuessFilename(document);
+			UploadBytes(
+				bytes,
+				filename,
+				GuessMime(document, filename),
+				std::move(done));
 			return;
 		}
 		++state->tries;
 		if (state->tries > 200) { // ~20s
 			state->timer.cancel();
-			state->done({}, true);
+			auto done = std::move(state->done);
+			state->keepAlive.reset();
+			done({}, true);
 			return;
 		}
 		state->timer.callOnce(100);
-	};
-	state->timer.setCallback(tick);
+	});
 	state->timer.callOnce(100);
 }
 
@@ -1049,14 +673,28 @@ void StartWithDocument(
 		not_null<HistoryItem*> item,
 		not_null<DocumentData*> document,
 		Fn<void(QString, bool)> done) {
+	constexpr auto kMaxUploadBytes = 24 * 1024 * 1024;
+	if (document->size > kMaxUploadBytes) {
+		done({}, true);
+		return;
+	}
 	auto media = document->createMediaView();
 	const auto bytes = ReadAudioBytes(document, media);
 	if (!bytes.isEmpty()) {
-		UploadBytes(bytes, GuessFilename(document), std::move(done));
+		const auto filename = GuessFilename(document);
+		UploadBytes(
+			bytes,
+			filename,
+			GuessMime(document, filename),
+			std::move(done));
 		return;
 	}
 	document->save(item->fullId(), QString());
-	WaitLoadedThenUpload(document, std::move(media), std::move(done));
+	WaitLoadedThenUpload(
+		base::make_weak(&document->session()),
+		document->id,
+		std::move(media),
+		std::move(done));
 }
 
 } // namespace
@@ -1134,6 +772,7 @@ This file is part of tdesktop-noads patches for Telegram Desktop.
 #include "ui/vertical_list.h"
 #include "ui/widgets/buttons.h"
 #include "ui/widgets/fields/input_field.h"
+#include "ui/widgets/fields/password_input.h"
 #include "ui/widgets/labels.h"
 #include "ui/wrap/vertical_layout.h"
 #include "window/window_controller.h"
@@ -1191,23 +830,41 @@ void AddStringOption(
 			st::boxLabel),
 		st::defaultBoxDividerLabelPadding);
 
-	const auto field = container->add(
-		object_ptr<Ui::InputField>(
-			container,
-			st::defaultInputField,
-			rpl::single(title),
-			option.value()),
-		st::defaultBoxDividerLabelPadding);
-	(void)password; // InputField has no password mode in this tree; keep API for future.
-	field->submits(
-	) | rpl::on_next([=, &option] {
-		option.set(field->getLastText().trimmed());
-	}, field->lifetime());
-	field->changes(
-	) | rpl::on_next([=, &option] {
-		// Debounced-ish: save on each change is fine for local options.
-		option.set(field->getLastText());
-	}, field->lifetime());
+	if (password) {
+		const auto field = container->add(
+			object_ptr<Ui::PasswordInput>(
+				container,
+				st::defaultInputField,
+				rpl::single(title),
+				option.value()),
+			st::defaultBoxDividerLabelPadding);
+		QObject::connect(
+			field,
+			&Ui::PasswordInput::submitted,
+			field,
+			[=, &option] { option.set(field->getLastText().trimmed()); });
+		QObject::connect(
+			field,
+			&Ui::PasswordInput::changed,
+			field,
+			[=, &option] { option.set(field->getLastText()); });
+	} else {
+		const auto field = container->add(
+			object_ptr<Ui::InputField>(
+				container,
+				st::defaultInputField,
+				rpl::single(title),
+				option.value()),
+			st::defaultBoxDividerLabelPadding);
+		field->submits(
+		) | rpl::on_next([=, &option] {
+			option.set(field->getLastText().trimmed());
+		}, field->lifetime());
+		field->changes(
+		) | rpl::on_next([=, &option] {
+			option.set(field->getLastText());
+		}, field->lifetime());
+	}
 
 	if (!option.description().isEmpty()) {
 		Ui::AddDividerText(container, rpl::single(option.description()));
@@ -1296,13 +953,6 @@ Type NoAdsId() {
 } // namespace Settings
 '''
 
-# Fix RegisterOptions call - wrong namespace in ctor
-SETTINGS_CPP = SETTINGS_CPP.replace(
-	"NoAds::Ai::RegisterOptions();",
-	"::NoAds::Ai::RegisterOptions();",
-)
-
-
 def patch_translate_provider(src: str) -> str:
     if "translate_llm_provider.h" in src:
         return src
@@ -1316,18 +966,58 @@ def patch_translate_provider(src: str) -> str:
     old = """std::unique_ptr<TranslateProvider> CreateTranslateProvider(
 		not_null<Main::Session*> session) {
 	const auto urlTemplate = OptionTranslateUrlTemplate.value();
+	if (!urlTemplate.isEmpty()
+		&& urlTemplate.contains(u"%q"_q)) {
+		return CreateUrlTranslateProvider(urlTemplate);
+	}
+	if (Core::App().settings().usePlatformTranslation()
+		&& Platform::IsTranslateProviderAvailable()) {
+		return Platform::CreateTranslateProvider();
+	}
+	return CreateMTProtoTranslateProvider(session);
+}
 """
     new = """std::unique_ptr<TranslateProvider> CreateTranslateProvider(
 		not_null<Main::Session*> session) {
 	NoAds::Ai::RegisterOptions();
-	if (NoAds::Ai::TranslateReady()) {
-		return CreateLlmTranslateProvider();
-	}
+	auto fallback = std::unique_ptr<TranslateProvider>();
 	const auto urlTemplate = OptionTranslateUrlTemplate.value();
+	if (!urlTemplate.isEmpty()
+		&& urlTemplate.contains(u"%q"_q)) {
+		fallback = CreateUrlTranslateProvider(urlTemplate);
+	} else if (Core::App().settings().usePlatformTranslation()
+		&& Platform::IsTranslateProviderAvailable()) {
+		fallback = Platform::CreateTranslateProvider();
+	} else {
+		fallback = CreateMTProtoTranslateProvider(session);
+	}
+	return CreateLlmTranslateProvider(std::move(fallback));
+}
 """
     if old not in out:
         raise SystemExit("translate_provider factory anchor missing")
     return out.replace(old, new, 1)
+
+
+def patch_transcribes_header(src: str) -> str:
+    out = src
+    if '#include "base/weak_ptr.h"' not in out:
+        out = out.replace(
+            '#include "mtproto/sender.h"\n',
+            '#include "mtproto/sender.h"\n#include "base/weak_ptr.h"\n',
+            1,
+        )
+    out = out.replace(
+        "class Transcribes final {",
+        "class Transcribes final : public base::has_weak_ptr {",
+        1,
+    )
+    out = out.replace(
+        "void load(not_null<HistoryItem*> item);",
+        "void load(not_null<HistoryItem*> item, bool custom = true);",
+        1,
+    )
+    return out
 
 
 def patch_transcribes(src: str) -> str:
@@ -1339,47 +1029,50 @@ def patch_transcribes(src: str) -> str:
         '#include "api/api_custom_transcribe.h"\n',
         1,
     )
-    # Inject at start of load() after local checks
-    old = """void Transcribes::load(not_null<HistoryItem*> item) {
-	if (!item->isHistoryEntry() || item->isLocal()) {
-		return;
-	}
-	const auto toggleRound = [](not_null<HistoryItem*> item, Entry &entry) {
-"""
-    new = """void Transcribes::load(not_null<HistoryItem*> item) {
-	if (!item->isHistoryEntry() || item->isLocal()) {
-		return;
-	}
-	const auto toggleRound = [](not_null<HistoryItem*> item, Entry &entry) {
-"""
-    # Better: after toggleRound lambda definition end, before request
-    # Insert custom path right after id is defined
+    out = out.replace(
+        "void Transcribes::load(not_null<HistoryItem*> item) {",
+        "void Transcribes::load(\n\t\tnot_null<HistoryItem*> item,\n\t\tbool custom) {",
+        1,
+    )
+    # Insert the custom path immediately before the official request.
     anchor = """	const auto id = item->fullId();
 	const auto requestId = _api.request(MTPmessages_TranscribeAudio(
 """
     insert = """	const auto id = item->fullId();
-	if (CustomTranscribeReady()) {
+	if (custom && CustomTranscribeReady()) {
 		auto &entry = _map.emplace(id).first->second;
 		entry.requestId = 1; // non-zero => loading
 		entry.shown = true;
 		entry.failed = false;
 		entry.pending = true;
 		entry.result = QString();
+		const auto weak = base::make_weak(this);
 		const auto ok = TryCustomTranscribe(item, [=](QString text, bool failed) {
-			auto &entry = _map[id];
+			if (!weak) {
+				return;
+			}
+			if (failed || text.isEmpty()) {
+				if (const auto current = weak->_session->data().message(id)) {
+					weak->load(current, false);
+				} else {
+					weak->_map.erase(id);
+				}
+				return;
+			}
+			auto &entry = weak->_map[id];
 			entry.requestId = 0;
 			entry.pending = false;
-			entry.failed = failed || text.isEmpty();
-			entry.result = failed ? QString() : text;
-			if (const auto current = _session->data().message(id)) {
+			entry.failed = false;
+			entry.result = text;
+			if (const auto current = weak->_session->data().message(id)) {
 				toggleRound(current, entry);
-				_session->data().requestItemResize(current);
+				weak->_session->data().requestItemResize(current);
 			}
 		});
 		if (ok) {
 			return;
 		}
-		// fall through to official API
+		// Unsupported media falls through to the official API.
 		entry.requestId = 0;
 		entry.pending = false;
 	}
@@ -1551,10 +1244,18 @@ def patch_settings_main(src: str) -> str:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--tag", default=DEFAULT_TAG)
+    args = parser.parse_args()
+    tag = args.tag if args.tag.startswith("v") else f"v{args.tag}"
+    global BASE
+    BASE = f"https://raw.githubusercontent.com/telegramdesktop/tdesktop/{tag}/"
+
     PATCHES.mkdir(parents=True, exist_ok=True)
 
-    # Fetch upstream files for hooks
+    # Fetch upstream files for hooks.
     tp = fetch("Telegram/SourceFiles/lang/translate_provider.cpp")
+    trh = fetch("Telegram/SourceFiles/api/api_transcribes.h")
     tr = fetch("Telegram/SourceFiles/api/api_transcribes.cpp")
     tb = fetch(
         "Telegram/SourceFiles/history/view/history_view_transcribe_button.cpp"
@@ -1623,6 +1324,13 @@ def main() -> None:
     p5 = []
     p5.append(udiff("", STT_H, "Telegram/SourceFiles/api/api_custom_transcribe.h"))
     p5.append(udiff("", STT_CPP, "Telegram/SourceFiles/api/api_custom_transcribe.cpp"))
+    p5.append(
+        udiff(
+            trh,
+            patch_transcribes_header(trh),
+            "Telegram/SourceFiles/api/api_transcribes.h",
+        )
+    )
     p5.append(
         udiff(
             tr,

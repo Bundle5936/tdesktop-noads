@@ -28,7 +28,7 @@
 +} // namespace Settings
 --- a/Telegram/SourceFiles/settings/settings_noads.cpp
 +++ b/Telegram/SourceFiles/settings/settings_noads.cpp
-@@ -0,0 +1,173 @@
+@@ -0,0 +1,192 @@
 +/*
 +This file is part of tdesktop-noads patches for Telegram Desktop.
 +*/
@@ -42,6 +42,7 @@
 +#include "ui/vertical_list.h"
 +#include "ui/widgets/buttons.h"
 +#include "ui/widgets/fields/input_field.h"
++#include "ui/widgets/fields/password_input.h"
 +#include "ui/widgets/labels.h"
 +#include "ui/wrap/vertical_layout.h"
 +#include "window/window_controller.h"
@@ -99,23 +100,41 @@
 +			st::boxLabel),
 +		st::defaultBoxDividerLabelPadding);
 +
-+	const auto field = container->add(
-+		object_ptr<Ui::InputField>(
-+			container,
-+			st::defaultInputField,
-+			rpl::single(title),
-+			option.value()),
-+		st::defaultBoxDividerLabelPadding);
-+	(void)password; // InputField has no password mode in this tree; keep API for future.
-+	field->submits(
-+	) | rpl::on_next([=, &option] {
-+		option.set(field->getLastText().trimmed());
-+	}, field->lifetime());
-+	field->changes(
-+	) | rpl::on_next([=, &option] {
-+		// Debounced-ish: save on each change is fine for local options.
-+		option.set(field->getLastText());
-+	}, field->lifetime());
++	if (password) {
++		const auto field = container->add(
++			object_ptr<Ui::PasswordInput>(
++				container,
++				st::defaultInputField,
++				rpl::single(title),
++				option.value()),
++			st::defaultBoxDividerLabelPadding);
++		QObject::connect(
++			field,
++			&Ui::PasswordInput::submitted,
++			field,
++			[=, &option] { option.set(field->getLastText().trimmed()); });
++		QObject::connect(
++			field,
++			&Ui::PasswordInput::changed,
++			field,
++			[=, &option] { option.set(field->getLastText()); });
++	} else {
++		const auto field = container->add(
++			object_ptr<Ui::InputField>(
++				container,
++				st::defaultInputField,
++				rpl::single(title),
++				option.value()),
++			st::defaultBoxDividerLabelPadding);
++		field->submits(
++		) | rpl::on_next([=, &option] {
++			option.set(field->getLastText().trimmed());
++		}, field->lifetime());
++		field->changes(
++		) | rpl::on_next([=, &option] {
++			option.set(field->getLastText());
++		}, field->lifetime());
++	}
 +
 +	if (!option.description().isEmpty()) {
 +		Ui::AddDividerText(container, rpl::single(option.description()));
@@ -128,7 +147,7 @@
 +	QWidget *parent,
 +	not_null<Window::SessionController*> controller)
 +: Section(parent, controller) {
-+	::::NoAds::Ai::RegisterOptions();
++	::NoAds::Ai::RegisterOptions();
 +	setupContent();
 +}
 +

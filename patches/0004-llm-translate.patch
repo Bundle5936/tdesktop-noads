@@ -1,12 +1,14 @@
 --- a/Telegram/SourceFiles/noads/noads_ai_options.h
 +++ b/Telegram/SourceFiles/noads/noads_ai_options.h
-@@ -0,0 +1,107 @@
+@@ -0,0 +1,126 @@
 +/*
 +This file is part of tdesktop-noads patches for Telegram Desktop.
 +*/
 +#pragma once
 +
 +#include "base/options.h"
++
++#include <QtCore/QUrl>
 +
 +namespace NoAds {
 +namespace Ai {
@@ -89,17 +91,34 @@
 +	return v.isEmpty() ? DefaultSttModel() : v;
 +}
 +
++[[nodiscard]] inline bool EndpointAllowed(const QString &base) {
++	const auto url = QUrl(base);
++	if (!url.isValid() || url.host().isEmpty()) {
++		return false;
++	}
++	if (url.scheme().compare(u"https"_q, Qt::CaseInsensitive) == 0) {
++		return true;
++	}
++	if (url.scheme().compare(u"http"_q, Qt::CaseInsensitive) != 0) {
++		return false;
++	}
++	const auto host = url.host().toLower();
++	return host == u"localhost"_q
++		|| host == u"127.0.0.1"_q
++		|| host == u"::1"_q;
++}
++
 +[[nodiscard]] inline bool TranslateReady() {
 +	return TranslateEnabled()
 +		&& !TranslateApiKey().isEmpty()
-+		&& !TranslateBaseUrl().isEmpty()
++		&& EndpointAllowed(TranslateBaseUrl())
 +		&& !TranslateModel().isEmpty();
 +}
 +
 +[[nodiscard]] inline bool SttReady() {
 +	return SttEnabled()
 +		&& !SttApiKey().isEmpty()
-+		&& !SttBaseUrl().isEmpty()
++		&& EndpointAllowed(SttBaseUrl())
 +		&& !SttModel().isEmpty();
 +}
 +
@@ -202,7 +221,7 @@
 +} // namespace NoAds
 --- a/Telegram/SourceFiles/lang/translate_llm_provider.h
 +++ b/Telegram/SourceFiles/lang/translate_llm_provider.h
-@@ -0,0 +1,12 @@
+@@ -0,0 +1,13 @@
 +/*
 +This file is part of tdesktop-noads patches for Telegram Desktop.
 +*/
@@ -212,12 +231,13 @@
 +
 +namespace Ui {
 +
-+[[nodiscard]] std::unique_ptr<TranslateProvider> CreateLlmTranslateProvider();
++[[nodiscard]] std::unique_ptr<TranslateProvider> CreateLlmTranslateProvider(
++	std::unique_ptr<TranslateProvider> fallback);
 +
 +} // namespace Ui
 --- a/Telegram/SourceFiles/lang/translate_llm_provider.cpp
 +++ b/Telegram/SourceFiles/lang/translate_llm_provider.cpp
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,143 @@
 +/*
 +This file is part of tdesktop-noads patches for Telegram Desktop.
 +*/
@@ -229,6 +249,7 @@
 +#include <QtCore/QJsonDocument>
 +#include <QtCore/QJsonObject>
 +#include <QtCore/QJsonParseError>
++#include <QtCore/QTimer>
 +#include <QtNetwork/QNetworkAccessManager>
 +#include <QtNetwork/QNetworkReply>
 +#include <QtNetwork/QNetworkRequest>
@@ -238,23 +259,30 @@
 +
 +class LlmTranslateProvider final : public TranslateProvider {
 +public:
-+	LlmTranslateProvider() {
++	explicit LlmTranslateProvider(
++			std::unique_ptr<TranslateProvider> fallback)
++	: _fallback(std::move(fallback)) {
 +		NoAds::Ai::RegisterOptions();
 +	}
 +
 +	[[nodiscard]] bool supportsMessageId() const override {
-+		return false;
++		return NoAds::Ai::TranslateReady()
++			? false
++			: _fallback->supportsMessageId();
 +	}
 +
 +	void request(
 +			TranslateProviderRequest request,
 +			LanguageId to,
 +			Fn<void(TranslateProviderResult)> done) override {
-+		if (request.text.text.trimmed().isEmpty()) {
-+			done({ .error = TranslateProviderError::Unknown });
++		if (!NoAds::Ai::TranslateReady()) {
++			_fallback->request(
++				std::move(request),
++				to,
++				std::move(done));
 +			return;
 +		}
-+		if (!NoAds::Ai::TranslateReady()) {
++		if (request.text.text.trimmed().isEmpty()) {
 +			done({ .error = TranslateProviderError::Unknown });
 +			return;
 +		}
@@ -290,7 +318,12 @@
 +		net.setRawHeader("Authorization", ("Bearer " + key).toUtf8());
 +
 +		const auto reply = _network.post(net, body);
-+		QObject::connect(reply, &QNetworkReply::finished, [=] {
++		QTimer::singleShot(60 * 1000, reply, [=] {
++			if (reply->isRunning()) {
++				reply->abort();
++			}
++		});
++		QObject::connect(reply, &QNetworkReply::finished, reply, [=] {
 +			auto finish = [&](TranslateProviderResult result) {
 +				done(std::move(result));
 +				reply->deleteLater();
@@ -335,14 +368,16 @@
 +	}
 +
 +private:
++	std::unique_ptr<TranslateProvider> _fallback;
 +	QNetworkAccessManager _network;
 +
 +};
 +
 +} // namespace
 +
-+std::unique_ptr<TranslateProvider> CreateLlmTranslateProvider() {
-+	return std::make_unique<LlmTranslateProvider>();
++std::unique_ptr<TranslateProvider> CreateLlmTranslateProvider(
++		std::unique_ptr<TranslateProvider> fallback) {
++	return std::make_unique<LlmTranslateProvider>(std::move(fallback));
 +}
 +
 +} // namespace Ui
@@ -357,17 +392,32 @@
  #include "platform/platform_translate_provider.h"
  
  namespace {
-@@ -33,6 +35,10 @@
+@@ -33,16 +35,19 @@
  
  std::unique_ptr<TranslateProvider> CreateTranslateProvider(
  		not_null<Main::Session*> session) {
 +	NoAds::Ai::RegisterOptions();
-+	if (NoAds::Ai::TranslateReady()) {
-+		return CreateLlmTranslateProvider();
-+	}
++	auto fallback = std::unique_ptr<TranslateProvider>();
  	const auto urlTemplate = OptionTranslateUrlTemplate.value();
  	if (!urlTemplate.isEmpty()
  		&& urlTemplate.contains(u"%q"_q)) {
+-		return CreateUrlTranslateProvider(urlTemplate);
++		fallback = CreateUrlTranslateProvider(urlTemplate);
++	} else if (Core::App().settings().usePlatformTranslation()
++		&& Platform::IsTranslateProviderAvailable()) {
++		fallback = Platform::CreateTranslateProvider();
++	} else {
++		fallback = CreateMTProtoTranslateProvider(session);
+ 	}
+-	if (Core::App().settings().usePlatformTranslation()
+-		&& Platform::IsTranslateProviderAvailable()) {
+-		return Platform::CreateTranslateProvider();
+-	}
+-	return CreateMTProtoTranslateProvider(session);
++	return CreateLlmTranslateProvider(std::move(fallback));
+ }
+ 
+ TranslateProviderRequest PrepareTranslateProviderRequest(
 --- a/Telegram/CMakeLists.txt
 +++ b/Telegram/CMakeLists.txt
 @@ -1779,6 +1779,10 @@

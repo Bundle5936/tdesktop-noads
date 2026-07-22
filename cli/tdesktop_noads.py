@@ -769,24 +769,54 @@ def auto_heal_settings_patch(src: Path, patch_path: Path) -> str:
     return patch_text
 
 
+def regenerate_ai_patches(src: Path) -> None:
+    # fetch_source() records the selected upstream tag next to its src/ tree.
+    # GitHub Actions invokes this helper on a checkout instead, so fall back to
+    # the current pin and finally the tag embedded in the source version file.
+    version_file = src.parent / "VERSION"
+    tag: str | None = None
+    if version_file.is_file():
+        tag = version_file.read_text(encoding="utf-8").strip()
+    if not tag and (src / ".git").exists():
+        described = subprocess.run(
+            ["git", "describe", "--tags", "--exact-match"],
+            cwd=src,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if described.returncode == 0:
+            tag = described.stdout.strip()
+    if not tag:
+        version_info = src / "Telegram" / "build" / "version"
+        if version_info.is_file():
+            match = re.search(
+                r"^AppVersionOriginal\s+([0-9.]+)",
+                version_info.read_text(encoding="utf-8", errors="replace"),
+                re.MULTILINE,
+            )
+            if match:
+                tag = match.group(1)
+    if not tag and DEFAULT_PIN.is_file():
+        tag = str(load_pin(DEFAULT_PIN).get("tag") or "")
+    if not tag:
+        raise CliError("cannot determine upstream tag for AI patch regeneration")
+    generator = REPO_ROOT / "scripts" / "gen_ai_patches.py"
+    if not generator.is_file():
+        raise CliError(f"missing AI patch generator: {generator}")
+    run([sys.executable, str(generator), "--tag", normalize_tag(tag)], cwd=REPO_ROOT)
+
+
 def auto_heal_named_patch(src: Path, patch_path: Path) -> str:
     name = patch_path.name.lower()
     if "sponsored" in name or name.startswith("0001"):
         return auto_heal_patch(src, patch_path)
     if "premium" in name or name.startswith("0002"):
         return auto_heal_local_premium_patch(src, patch_path)
-    if "noads-page" in name or ("settings" in name and "0003" in name) or name.startswith("0003"):
-        return auto_heal_settings_patch(src, patch_path)
-    if "llm" in name or "translate" in name or name.startswith("0004"):
-        # Structural heal: keep existing patch if only offset drift; otherwise require regen script.
-        # Try plain re-apply after refresh is done by caller; here just error with hint.
-        raise CliError(
-            "0004 llm-translate auto-heal: re-run scripts/gen_ai_patches.py against new tag"
-        )
-    if "stt" in name or "transcrib" in name or name.startswith("0005"):
-        raise CliError(
-            "0005 custom-stt auto-heal: re-run scripts/gen_ai_patches.py against new tag"
-        )
+    if name.startswith(("0003", "0004", "0005")):
+        regenerate_ai_patches(src)
+        return patch_path.read_text(encoding="utf-8")
     raise CliError(f"no auto-heal strategy for {patch_path.name}")
 
 
@@ -816,6 +846,10 @@ def apply_all_patches(
             auto_heal_named_patch(src, patch)
             apply_patch(src, patch, check_only=check_only)
             healed_any = True
+        if check_only:
+            # Later patches are generated against the tree produced by earlier
+            # patches, so validation must advance the disposable source tree.
+            apply_patch(src, patch, check_only=False)
     return healed_any
 
 
@@ -831,7 +865,9 @@ def write_release_notes(path: Path, release: dict, tag: str, *, healed: bool) ->
         f"- Patches: `{patches}` — **{mode}**\n\n"
         f"### Features\n\n"
         f"- No Sponsored Messages (client-side)\n"
-        f"- Local Premium (client-side UI spoof; server-gated features still need real Premium)\n- Chinese settings page: 设置 -> 去广告与本地会员\n\n"
+        f"- Local Premium (client-side UI spoof; server-gated features still need real Premium)\n"
+        f"- Chinese settings page: 设置 -> 去广告 / AI / 语音\n"
+        f"- Optional OpenAI-compatible LLM translation and custom STT\n\n"
         f"### Official changelog\n\n{body}\n\n"
         f"### Portable build\n\n"
         f"Windows x64 portable zip is produced by `build-windows` workflow and attached here.\n",
@@ -908,9 +944,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             apply_patch(src, Path(args.patch).resolve(), check_only=False)
     else:
         apply_all_patches(src, check_only=True, heal=False)
-        if not args.dry_run_only:
-            apply_all_patches(src, check_only=False, heal=False)
-    log(f"OK: patches apply on {tag}")
+    log(f"OK: patches apply sequentially on {tag}")
     github_output("patch_ok", "true")
     github_output("tag", tag)
     return 0
@@ -1004,8 +1038,6 @@ def cmd_follow(args: argparse.Namespace) -> int:
         )
         if healed:
             heal_note = "auto-healed (one or more patches regenerated)"
-        if not args.dry_run_only:
-            apply_all_patches(src, patches, check_only=False, heal=False)
     except CliError as e:
         fail = {
             "tag": tag,
