@@ -20,7 +20,7 @@
 +} // namespace Api
 --- a/Telegram/SourceFiles/api/api_custom_transcribe.cpp
 +++ b/Telegram/SourceFiles/api/api_custom_transcribe.cpp
-@@ -0,0 +1,279 @@
+@@ -0,0 +1,280 @@
 +/*
 +This file is part of tdesktop-noads patches for Telegram Desktop.
 +*/
@@ -42,6 +42,7 @@
 +#include <QtCore/QJsonObject>
 +#include <QtCore/QJsonParseError>
 +#include <QtCore/QTimer>
++#include <QtCore/QUrl>
 +#include <QtNetwork/QHttpMultiPart>
 +#include <QtNetwork/QHttpPart>
 +#include <QtNetwork/QNetworkAccessManager>

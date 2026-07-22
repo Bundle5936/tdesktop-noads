@@ -237,7 +237,7 @@
 +} // namespace Ui
 --- a/Telegram/SourceFiles/lang/translate_llm_provider.cpp
 +++ b/Telegram/SourceFiles/lang/translate_llm_provider.cpp
-@@ -0,0 +1,143 @@
+@@ -0,0 +1,144 @@
 +/*
 +This file is part of tdesktop-noads patches for Telegram Desktop.
 +*/
@@ -250,6 +250,7 @@
 +#include <QtCore/QJsonObject>
 +#include <QtCore/QJsonParseError>
 +#include <QtCore/QTimer>
++#include <QtCore/QUrl>
 +#include <QtNetwork/QNetworkAccessManager>
 +#include <QtNetwork/QNetworkReply>
 +#include <QtNetwork/QNetworkRequest>

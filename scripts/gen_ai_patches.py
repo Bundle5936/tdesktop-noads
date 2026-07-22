@@ -290,6 +290,7 @@ This file is part of tdesktop-noads patches for Telegram Desktop.
 #include <QtCore/QJsonObject>
 #include <QtCore/QJsonParseError>
 #include <QtCore/QTimer>
+#include <QtCore/QUrl>
 #include <QtNetwork/QNetworkAccessManager>
 #include <QtNetwork/QNetworkReply>
 #include <QtNetwork/QNetworkRequest>
@@ -468,6 +469,7 @@ This file is part of tdesktop-noads patches for Telegram Desktop.
 #include <QtCore/QJsonObject>
 #include <QtCore/QJsonParseError>
 #include <QtCore/QTimer>
+#include <QtCore/QUrl>
 #include <QtNetwork/QHttpMultiPart>
 #include <QtNetwork/QHttpPart>
 #include <QtNetwork/QNetworkAccessManager>
@@ -775,14 +777,12 @@ This file is part of tdesktop-noads patches for Telegram Desktop.
 #include "ui/widgets/fields/password_input.h"
 #include "ui/widgets/labels.h"
 #include "ui/wrap/vertical_layout.h"
-#include "window/window_controller.h"
 #include "window/window_session_controller.h"
 
 namespace Settings {
 namespace {
 
 void AddToggle(
-		not_null<Window::Controller*> window,
 		not_null<Ui::VerticalLayout*> container,
 		const char *optionId) {
 	auto &option = base::options::lookup<bool>(optionId);
@@ -887,8 +887,6 @@ rpl::producer<QString> NoAds::title() {
 
 void NoAds::setupContent() {
 	const auto content = Ui::CreateChild<Ui::VerticalLayout>(this);
-	const auto window = &controller()->window();
-
 	Ui::AddSkip(content);
 	Ui::AddSubsectionTitle(content, rpl::single(u"基础"_q));
 	content->add(
@@ -899,8 +897,8 @@ void NoAds::setupContent() {
 			st::boxLabel),
 		st::defaultBoxDividerLabelPadding);
 
-	AddToggle(window, content, "noads-disable-ads");
-	AddToggle(window, content, "noads-local-premium");
+	AddToggle(content, "noads-disable-ads");
+	AddToggle(content, "noads-local-premium");
 
 	Ui::AddSkip(content);
 	Ui::AddDivider(content);
@@ -914,7 +912,7 @@ void NoAds::setupContent() {
 			st::boxLabel),
 		st::defaultBoxDividerLabelPadding);
 
-	AddToggle(window, content, "noads-ai-translate");
+	AddToggle(content, "noads-ai-translate");
 	AddStringOption(content, "noads-ai-base-url");
 	AddStringOption(content, "noads-ai-api-key", true);
 	AddStringOption(content, "noads-ai-model");
@@ -932,7 +930,7 @@ void NoAds::setupContent() {
 			st::boxLabel),
 		st::defaultBoxDividerLabelPadding);
 
-	AddToggle(window, content, "noads-stt-enable");
+	AddToggle(content, "noads-stt-enable");
 	AddStringOption(content, "noads-stt-base-url");
 	AddStringOption(content, "noads-stt-api-key", true);
 	AddStringOption(content, "noads-stt-model");
