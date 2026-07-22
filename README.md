@@ -2,67 +2,87 @@
 
 **纯 GitHub**：自动跟随官方 Telegram Desktop，打补丁，编译 **Windows x64 便携包**。
 
-## 中文设置页（独立一页）
-
-打开客户端后：
+## 设置入口
 
 ```text
-设置 → 去广告与本地会员
+设置 → 去广告 / AI / 语音
 ```
 
-页内两个开关（**默认开启**，中文）：
+### 基础
 
 | 开关 | 说明 |
 |------|------|
-| **禁用赞助广告** | 关闭频道/机器人赞助消息（仅本客户端） |
-| **本地大会员** | UI 伪装 Premium；**不能**解锁服务器校验权益；改后建议重启 |
+| **禁用赞助广告** | 默认开；仅本客户端 |
+| **本地大会员** | 默认开；UI 伪装，**不能**解锁服务器权益 |
 
-### 补丁
+### AI 翻译（OpenAI 兼容，真 LLM）
+
+| 项 | 说明 |
+|----|------|
+| **启用 AI 翻译** | 开后覆盖官方/URL/系统翻译 |
+| **Base URL** | 如 `https://api.openai.com/v1` |
+| **API Key** | Bearer Token，仅本机 |
+| **模型** | 默认 `gpt-4o-mini` |
+| **系统提示词** | 可改翻译风格 |
+
+生效范围：**单条翻译 + 自动翻译**（官方 `CreateTranslateProvider` 钩子）。
+
+协议：`POST {base}/chat/completions`。
+
+### 自定义 STT（语音转写）
+
+| 项 | 说明 |
+|----|------|
+| **启用自定义语音转写** | 开后优先走自建 API；可解非会员锁 |
+| **STT Base URL / Key / 模型** | 可留空，默认复用上方 AI 配置；模型默认 `whisper-1` |
+
+协议：`POST {base}/audio/transcriptions`（multipart：`model` + `file`）。
+
+未开启或失败配置时回退官方转写。
+
+## 补丁列表
 
 | 文件 | 作用 |
 |------|------|
-| `0001-no-sponsored-messages.patch` | 去广告逻辑 + 选项定义 |
-| `0002-local-premium.patch` | 本地大会员逻辑 + 选项定义 |
-| `0003-settings-noads-page.patch` | **独立设置页** + 主设置入口 + CMake |
+| `0001` | 去广告 |
+| `0002` | 本地大会员 |
+| `0003` | 中文设置页 |
+| `0004` | LLM 翻译 provider + 工厂接入 |
+| `0005` | 自定义 STT + 转写按钮解锁 |
 
-### localPremium 能 / 不能
+上游改动尽量集中：
 
-| 通常有效（客户端） | 通常无效（服务器） |
-|--------------------|--------------------|
-| 界面显示会员 | 更大上传体积 |
-| 部分本地限制/入口 | 真会员专属业务 |
+- 翻译：只改 `CreateTranslateProvider` 决策 + 新文件  
+- STT：只改 `Transcribes::load` / 转写按钮锁 + 新文件  
+
+重新生成 AI 补丁：
+
+```bash
+python scripts/gen_ai_patches.py
+```
 
 ## 便携包
 
 Release：`tportable-x64-noads-<version>.zip`
 
-1. 解压任意目录  
-2. 运行 `Telegram.exe`（数据在 `tdata/`）  
-3. 语言可切官方简体中文  
-4. 功能：`设置 → 去广告与本地会员`
-
-## 自动流程
-
-```text
-auto-follow（每 6h）
-  → 官方新版本 + 补丁验证 / auto-heal
-  → build-windows → portable zip
-```
+1. 解压 → `Telegram.exe`  
+2. 数据在 `tdata/`  
+3. 配置：`设置 → 去广告 / AI / 语音`
 
 ## Secrets（建议）
 
 | Name | 说明 |
 |------|------|
-| `TDESKTOP_API_ID` | https://my.telegram.org/apps |
-| `TDESKTOP_API_HASH` | 同上 |
+| `TDESKTOP_API_ID` / `TDESKTOP_API_HASH` | https://my.telegram.org/apps |
 
 不配则用公开测试 API `611335`。
 
 ## 风险
 
 - 非官方客户端  
+- API Key 费用与隐私自负  
 - localPremium ≠ 真 Premium  
-- 未签名，SmartScreen 可能拦截  
+- 未签名可能触发 SmartScreen  
 
 ## License
 

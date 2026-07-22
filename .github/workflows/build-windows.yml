@@ -121,7 +121,9 @@ jobs:
             --heal-on-fail
           echo "--- sponsored ---"; grep -n "noads-disable-ads\|OptionNoadsDisableAds" "$TBUILD/tdesktop/Telegram/SourceFiles/data/components/sponsored_messages.cpp" | head || true
           echo "--- premium ---"; grep -n "noads-local-premium\|OptionNoadsLocalPremium" "$TBUILD/tdesktop/Telegram/SourceFiles/main/main_session.cpp" "$TBUILD/tdesktop/Telegram/SourceFiles/data/data_peer_values.cpp" | head || true
-          echo "--- settings page ---"; test -f "$TBUILD/tdesktop/Telegram/SourceFiles/settings/settings_noads.cpp" && grep -n "NoAds\|去广告" "$TBUILD/tdesktop/Telegram/SourceFiles/settings/settings_noads.cpp" "$TBUILD/tdesktop/Telegram/SourceFiles/settings/sections/settings_main.cpp" | head || true
+          echo "--- settings page ---"; test -f "$TBUILD/tdesktop/Telegram/SourceFiles/settings/settings_noads.cpp" && grep -n "NoAds\|去广告\|AI" "$TBUILD/tdesktop/Telegram/SourceFiles/settings/settings_noads.cpp" "$TBUILD/tdesktop/Telegram/SourceFiles/settings/sections/settings_main.cpp" | head || true
+          echo "--- llm ---"; test -f "$TBUILD/tdesktop/Telegram/SourceFiles/lang/translate_llm_provider.cpp" && grep -n "CreateLlmTranslateProvider\|TranslateReady" "$TBUILD/tdesktop/Telegram/SourceFiles/lang/translate_provider.cpp" "$TBUILD/tdesktop/Telegram/SourceFiles/lang/translate_llm_provider.cpp" | head || true
+          echo "--- stt ---"; test -f "$TBUILD/tdesktop/Telegram/SourceFiles/api/api_custom_transcribe.cpp" && grep -n "CustomTranscribeReady\|TryCustomTranscribe" "$TBUILD/tdesktop/Telegram/SourceFiles/api/api_transcribes.cpp" "$TBUILD/tdesktop/Telegram/SourceFiles/history/view/history_view_transcribe_button.cpp" | head || true
 
       - name: First set up
         shell: bash
@@ -305,9 +307,10 @@ jobs:
           =====================================
           Upstream: ${{ steps.meta.outputs.tag }}
           Patches:
-            - 禁用赞助广告 (default ON)
-            - 本地大会员 (default ON, client-side only)
-            - UI: 设置 -> 去广告与本地会员
+            - 禁用赞助广告 / 本地大会员
+            - AI 翻译 (OpenAI-compatible chat/completions)
+            - 自定义 STT (OpenAI-compatible audio/transcriptions)
+            - UI: 设置 -> 去广告 / AI / 语音
           API credentials source: ${{ steps.meta.outputs.api_source }}
 
           Usage:
@@ -349,7 +352,7 @@ jobs:
 
             - Upstream: https://github.com/telegramdesktop/tdesktop/releases/tag/${{ steps.meta.outputs.tag }}
             - Windows portable: `tportable-x64-noads-${{ steps.meta.outputs.ver }}.zip`
-            - Patches: no-ads + localPremium + 中文设置页
+            - Patches: no-ads + localPremium + settings + LLM translate + custom STT
             - API: `${{ steps.meta.outputs.api_source }}`
 
             Extract → run `Telegram.exe`. Data in `tdata/`.

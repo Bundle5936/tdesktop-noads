@@ -28,32 +28,29 @@
 +} // namespace Settings
 --- a/Telegram/SourceFiles/settings/settings_noads.cpp
 +++ b/Telegram/SourceFiles/settings/settings_noads.cpp
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,173 @@
 +/*
 +This file is part of tdesktop-noads patches for Telegram Desktop.
 +*/
 +#include "settings/settings_noads.h"
 +
 +#include "base/options.h"
-+#include "base/timer.h"
-+#include "core/application.h"
-+#include "lang/lang_keys.h"
++#include "noads/noads_ai_options.h"
 +#include "settings/settings_common.h"
 +#include "styles/style_layers.h"
-+#include "styles/style_menu_icons.h"
 +#include "styles/style_settings.h"
-+#include "ui/boxes/confirm_box.h"
 +#include "ui/vertical_list.h"
 +#include "ui/widgets/buttons.h"
++#include "ui/widgets/fields/input_field.h"
 +#include "ui/widgets/labels.h"
 +#include "ui/wrap/vertical_layout.h"
-+#include "window/window_session_controller.h"
 +#include "window/window_controller.h"
++#include "window/window_session_controller.h"
 +
 +namespace Settings {
 +namespace {
 +
-+void AddNoadsToggle(
++void AddToggle(
 +		not_null<Window::Controller*> window,
 +		not_null<Ui::VerticalLayout*> container,
 +		const char *optionId) {
@@ -64,43 +61,64 @@
 +	const auto description = option.description();
 +
 +	Ui::AddSkip(container, st::settingsCheckboxesSkip);
-+
-+	const auto toggles = container->lifetime().make_state<rpl::event_stream<bool>>();
++	const auto toggles = container->lifetime().make_state<
++		rpl::event_stream<bool>>();
 +	const auto button = container->add(object_ptr<Button>(
 +		container,
 +		rpl::single(name),
 +		st::settingsButtonNoIcon
 +	))->toggleOn(toggles->events_starting_with(option.value()));
 +
-+	const auto restarter = option.restartRequired()
-+		? button->lifetime().make_state<base::Timer>()
-+		: nullptr;
-+	if (restarter) {
-+		restarter->setCallback([=] {
-+			window->show(Ui::MakeConfirmBox({
-+				.text = tr::lng_settings_need_restart(),
-+				.confirmed = [] { Core::Restart(); },
-+				.confirmText = tr::lng_settings_restart_now(),
-+				.cancelText = tr::lng_settings_restart_later(),
-+			}));
-+		});
-+	}
-+
 +	button->toggledChanges(
 +	) | rpl::on_next([=, &option](bool toggled) {
-+		if (option.value() == toggled) {
-+			return;
-+		}
-+		option.set(toggled);
-+		if (restarter) {
-+			restarter->callOnce(st::settingsButtonNoIcon.toggle.duration);
++		if (option.value() != toggled) {
++			option.set(toggled);
 +		}
 +	}, button->lifetime());
 +
 +	if (!description.isEmpty()) {
 +		Ui::AddSkip(container, st::settingsCheckboxesSkip);
 +		Ui::AddDividerText(container, rpl::single(description));
-+		Ui::AddSkip(container, st::settingsCheckboxesSkip);
++	}
++}
++
++void AddStringOption(
++		not_null<Ui::VerticalLayout*> container,
++		const char *optionId,
++		bool password = false) {
++	auto &option = base::options::lookup<QString>(optionId);
++	const auto title = option.name().isEmpty()
++		? QString::fromUtf8(optionId)
++		: option.name();
++
++	Ui::AddSkip(container);
++	container->add(
++		object_ptr<Ui::FlatLabel>(
++			container,
++			rpl::single(title),
++			st::boxLabel),
++		st::defaultBoxDividerLabelPadding);
++
++	const auto field = container->add(
++		object_ptr<Ui::InputField>(
++			container,
++			st::defaultInputField,
++			rpl::single(title),
++			option.value()),
++		st::defaultBoxDividerLabelPadding);
++	(void)password; // InputField has no password mode in this tree; keep API for future.
++	field->submits(
++	) | rpl::on_next([=, &option] {
++		option.set(field->getLastText().trimmed());
++	}, field->lifetime());
++	field->changes(
++	) | rpl::on_next([=, &option] {
++		// Debounced-ish: save on each change is fine for local options.
++		option.set(field->getLastText());
++	}, field->lifetime());
++
++	if (!option.description().isEmpty()) {
++		Ui::AddDividerText(container, rpl::single(option.description()));
 +	}
 +}
 +
@@ -110,11 +128,12 @@
 +	QWidget *parent,
 +	not_null<Window::SessionController*> controller)
 +: Section(parent, controller) {
++	::::NoAds::Ai::RegisterOptions();
 +	setupContent();
 +}
 +
 +rpl::producer<QString> NoAds::title() {
-+	return rpl::single(u"去广告与本地会员"_q);
++	return rpl::single(u"去广告 / AI / 语音"_q);
 +}
 +
 +void NoAds::setupContent() {
@@ -122,34 +141,58 @@
 +	const auto window = &controller()->window();
 +
 +	Ui::AddSkip(content);
-+	Ui::AddSubsectionTitle(
-+		content,
-+		rpl::single(u"tdesktop-noads"_q));
-+
++	Ui::AddSubsectionTitle(content, rpl::single(u"基础"_q));
 +	content->add(
 +		object_ptr<Ui::FlatLabel>(
 +			content,
 +			rpl::single(
-+				u"以下开关仅影响本客户端。本地大会员不能解锁服务器校验的会员权益（例如更大上传限制）。"_q),
++				u"以下均为本客户端本地设置。API Key 只存在本机，不会上传到本仓库。"_q),
 +			st::boxLabel),
 +		st::defaultBoxDividerLabelPadding);
++
++	AddToggle(window, content, "noads-disable-ads");
++	AddToggle(window, content, "noads-local-premium");
 +
 +	Ui::AddSkip(content);
 +	Ui::AddDivider(content);
 +	Ui::AddSkip(content);
++	Ui::AddSubsectionTitle(content, rpl::single(u"AI 翻译（OpenAI 兼容）"_q));
++	content->add(
++		object_ptr<Ui::FlatLabel>(
++			content,
++			rpl::single(
++				u"开启后，单条翻译与自动翻译均走 chat/completions。需可访问的 Base URL 与 API Key。"_q),
++			st::boxLabel),
++		st::defaultBoxDividerLabelPadding);
 +
-+	Ui::AddSubsectionTitle(
-+		content,
-+		rpl::single(u"功能开关"_q));
++	AddToggle(window, content, "noads-ai-translate");
++	AddStringOption(content, "noads-ai-base-url");
++	AddStringOption(content, "noads-ai-api-key", true);
++	AddStringOption(content, "noads-ai-model");
++	AddStringOption(content, "noads-ai-system-prompt");
 +
-+	AddNoadsToggle(window, content, "noads-disable-ads");
-+	AddNoadsToggle(window, content, "noads-local-premium");
++	Ui::AddSkip(content);
++	Ui::AddDivider(content);
++	Ui::AddSkip(content);
++	Ui::AddSubsectionTitle(content, rpl::single(u"自定义语音转写 STT"_q));
++	content->add(
++		object_ptr<Ui::FlatLabel>(
++			content,
++			rpl::single(
++				u"开启后优先使用 /audio/transcriptions。STT 的 URL/Key/模型可留空以复用上方 AI 配置。失败时可改回关闭使用官方转写。"_q),
++			st::boxLabel),
++		st::defaultBoxDividerLabelPadding);
++
++	AddToggle(window, content, "noads-stt-enable");
++	AddStringOption(content, "noads-stt-base-url");
++	AddStringOption(content, "noads-stt-api-key", true);
++	AddStringOption(content, "noads-stt-model");
 +
 +	Ui::AddSkip(content);
 +	Ui::AddDividerText(
 +		content,
 +		rpl::single(
-+			u"非官方构建。设置保存在本机实验选项配置中，可随时开关。"_q));
++			u"非官方构建。请自备 API。AI/STT 产生费用与隐私责任由你自行承担。"_q));
 +
 +	Ui::ResizeFitChild(this, content);
 +}
@@ -180,23 +223,27 @@
  #include "settings/sections/settings_premium.h"
  #include "settings/sections/settings_privacy_security.h"
  #include "settings/settings_scale_preview.h"
-@@ -432,6 +433,19 @@
- 		.targetSection = AdvancedId(),
+@@ -433,6 +434,23 @@
  		.icon = { &st::menuIconManage },
  		.keywords = { u"performance"_q, u"proxy"_q, u"experimental"_q },
-+	});
+ 	});
 +
 +	builder.addSectionButton({
-+		.title = rpl::single(u"去广告与本地会员"_q),
++		.title = rpl::single(u"去广告 / AI / 语音"_q),
 +		.targetSection = NoAdsId(),
 +		.icon = { &st::menuIconFave },
 +		.keywords = {
 +			u"ads"_q,
 +			u"premium"_q,
-+			u"noads"_q,
-+			u"赞助"_q,
-+			u"会员"_q,
++			u"ai"_q,
++			u"translate"_q,
++			u"stt"_q,
++			u"whisper"_q,
++			u"翻译"_q,
++			u"语音"_q,
 +		},
- 	});
++	});
++
  
  	builder.addSectionButton({
+ 		.title = tr::lng_settings_section_devices(),

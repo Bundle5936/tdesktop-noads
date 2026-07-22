@@ -1,0 +1,328 @@
+--- a/Telegram/SourceFiles/api/api_custom_transcribe.h
++++ b/Telegram/SourceFiles/api/api_custom_transcribe.h
+@@ -0,0 +1,17 @@
++/*
++This file is part of tdesktop-noads patches for Telegram Desktop.
++*/
++#pragma once
++
++class HistoryItem;
++
++namespace Api {
++
++// Returns true if custom STT started (caller should not use official API).
++bool TryCustomTranscribe(
++	not_null<HistoryItem*> item,
++	Fn<void(QString text, bool failed)> done);
++
++[[nodiscard]] bool CustomTranscribeReady();
++
++} // namespace Api
+--- a/Telegram/SourceFiles/api/api_custom_transcribe.cpp
++++ b/Telegram/SourceFiles/api/api_custom_transcribe.cpp
+@@ -0,0 +1,222 @@
++/*
++This file is part of tdesktop-noads patches for Telegram Desktop.
++*/
++#include "api/api_custom_transcribe.h"
++
++#include "base/timer.h"
++#include "data/data_document.h"
++#include "data/data_document_media.h"
++#include "data/data_session.h"
++#include "history/history_item.h"
++#include "main/main_session.h"
++#include "noads/noads_ai_options.h"
++
++#include <QtCore/QFile>
++#include <QtCore/QFileInfo>
++#include <QtCore/QHttpMultiPart>
++#include <QtCore/QHttpPart>
++#include <QtCore/QJsonDocument>
++#include <QtCore/QJsonObject>
++#include <QtCore/QJsonParseError>
++#include <QtNetwork/QNetworkAccessManager>
++#include <QtNetwork/QNetworkReply>
++#include <QtNetwork/QNetworkRequest>
++
++namespace Api {
++namespace {
++
++QNetworkAccessManager &Network() {
++	static QNetworkAccessManager instance;
++	return instance;
++}
++
++[[nodiscard]] QByteArray ReadAudioBytes(
++		not_null<DocumentData*> document,
++		const std::shared_ptr<Data::DocumentMedia> &media) {
++	if (media) {
++		const auto bytes = media->bytes();
++		if (!bytes.isEmpty()) {
++			return bytes;
++		}
++	}
++	const auto path = document->filepath(true);
++	if (path.isEmpty()) {
++		return {};
++	}
++	auto f = QFile(path);
++	if (!f.open(QIODevice::ReadOnly)) {
++		return {};
++	}
++	return f.readAll();
++}
++
++[[nodiscard]] QString GuessFilename(not_null<DocumentData*> document) {
++	auto name = document->filename();
++	if (!name.isEmpty()) {
++		return name;
++	}
++	const auto path = document->filepath(true);
++	if (!path.isEmpty()) {
++		return QFileInfo(path).fileName();
++	}
++	if (document->isVoiceMessage() || document->isVideoMessage()) {
++		return u"voice.ogg"_q;
++	}
++	return u"audio.bin"_q;
++}
++
++[[nodiscard]] QString GuessMime(const QString &filename) {
++	const auto lower = filename.toLower();
++	if (lower.endsWith(u".ogg"_q) || lower.endsWith(u".opus"_q)) {
++		return u"audio/ogg"_q;
++	} else if (lower.endsWith(u".mp3"_q)) {
++		return u"audio/mpeg"_q;
++	} else if (lower.endsWith(u".wav"_q)) {
++		return u"audio/wav"_q;
++	} else if (lower.endsWith(u".m4a"_q) || lower.endsWith(u".mp4"_q)) {
++		return u"audio/mp4"_q;
++	} else if (lower.endsWith(u".webm"_q)) {
++		return u"audio/webm"_q;
++	}
++	return u"application/octet-stream"_q;
++}
++
++void UploadBytes(
++		QByteArray bytes,
++		QString filename,
++		Fn<void(QString text, bool failed)> done) {
++	if (bytes.isEmpty()) {
++		done({}, true);
++		return;
++	}
++	const auto base = NoAds::Ai::SttBaseUrl();
++	const auto key = NoAds::Ai::SttApiKey();
++	const auto model = NoAds::Ai::SttModel();
++
++	const auto multi = new QHttpMultiPart(QHttpMultiPart::FormDataType);
++	{
++		QHttpPart modelPart;
++		modelPart.setHeader(
++			QNetworkRequest::ContentDispositionHeader,
++			QVariant(u"form-data; name=\"model\""_q));
++		modelPart.setBody(model.toUtf8());
++		multi->append(modelPart);
++	}
++	{
++		QHttpPart filePart;
++		filePart.setHeader(
++			QNetworkRequest::ContentDispositionHeader,
++			QVariant(
++				u"form-data; name=\"file\"; filename=\"%1\""_q.arg(
++					filename)));
++		filePart.setHeader(
++			QNetworkRequest::ContentTypeHeader,
++			QVariant(GuessMime(filename)));
++		filePart.setBody(bytes);
++		multi->append(filePart);
++	}
++
++	auto req = QNetworkRequest(QUrl(base + u"/audio/transcriptions"_q));
++	req.setRawHeader("Authorization", ("Bearer " + key).toUtf8());
++	const auto reply = Network().post(req, multi);
++	multi->setParent(reply);
++
++	QObject::connect(reply, &QNetworkReply::finished, [=] {
++		QString text;
++		bool failed = true;
++		if (reply->error() == QNetworkReply::NoError) {
++			const auto body = reply->readAll();
++			auto err = QJsonParseError();
++			const auto doc = QJsonDocument::fromJson(body, &err);
++			if (err.error == QJsonParseError::NoError && doc.isObject()) {
++				text = doc.object().value(u"text"_q).toString().trimmed();
++				failed = text.isEmpty();
++			} else {
++				text = QString::fromUtf8(body).trimmed();
++				failed = text.isEmpty();
++			}
++		}
++		done(text, failed);
++		reply->deleteLater();
++	});
++}
++
++void WaitLoadedThenUpload(
++		not_null<DocumentData*> document,
++		std::shared_ptr<Data::DocumentMedia> media,
++		Fn<void(QString, bool)> done) {
++	// Keep media alive while polling.
++	struct State {
++		std::shared_ptr<Data::DocumentMedia> media;
++		base::Timer timer;
++		int tries = 0;
++		Fn<void(QString, bool)> done;
++		DocumentData *document = nullptr;
++	};
++	const auto state = std::make_shared<State>();
++	state->media = std::move(media);
++	state->done = std::move(done);
++	state->document = document;
++
++	const auto tick = [=] {
++		const auto bytes = ReadAudioBytes(state->document, state->media);
++		if (!bytes.isEmpty()) {
++			state->timer.cancel();
++			UploadBytes(bytes, GuessFilename(state->document), state->done);
++			return;
++		}
++		++state->tries;
++		if (state->tries > 200) { // ~20s
++			state->timer.cancel();
++			state->done({}, true);
++			return;
++		}
++		state->timer.callOnce(100);
++	};
++	state->timer.setCallback(tick);
++	state->timer.callOnce(100);
++}
++
++void StartWithDocument(
++		not_null<HistoryItem*> item,
++		not_null<DocumentData*> document,
++		Fn<void(QString, bool)> done) {
++	auto media = document->createMediaView();
++	const auto bytes = ReadAudioBytes(document, media);
++	if (!bytes.isEmpty()) {
++		UploadBytes(bytes, GuessFilename(document), std::move(done));
++		return;
++	}
++	document->save(item->fullId(), QString());
++	WaitLoadedThenUpload(document, std::move(media), std::move(done));
++}
++
++} // namespace
++
++bool CustomTranscribeReady() {
++	NoAds::Ai::RegisterOptions();
++	return NoAds::Ai::SttReady();
++}
++
++bool TryCustomTranscribe(
++		not_null<HistoryItem*> item,
++		Fn<void(QString text, bool failed)> done) {
++	NoAds::Ai::RegisterOptions();
++	if (!NoAds::Ai::SttReady()) {
++		return false;
++	}
++	const auto media = item->media();
++	const auto document = media ? media->document() : nullptr;
++	if (!document) {
++		return false;
++	}
++	if (!document->isVoiceMessage()
++		&& !document->isVideoMessage()
++		&& !document->isAudioFile()) {
++		return false;
++	}
++	StartWithDocument(item, document, std::move(done));
++	return true;
++}
++
++} // namespace Api
+--- a/Telegram/SourceFiles/api/api_transcribes.cpp
++++ b/Telegram/SourceFiles/api/api_transcribes.cpp
+@@ -21,6 +21,7 @@
+ #include "main/main_session.h"
+ #include "main/main_session_settings.h"
+ #include "spellcheck/spellcheck_types.h"
++#include "api/api_custom_transcribe.h"
+ 
+ namespace Api {
+ 
+@@ -185,6 +186,31 @@
+ 		}
+ 	};
+ 	const auto id = item->fullId();
++	if (CustomTranscribeReady()) {
++		auto &entry = _map.emplace(id).first->second;
++		entry.requestId = 1; // non-zero => loading
++		entry.shown = true;
++		entry.failed = false;
++		entry.pending = true;
++		entry.result = QString();
++		const auto ok = TryCustomTranscribe(item, [=](QString text, bool failed) {
++			auto &entry = _map[id];
++			entry.requestId = 0;
++			entry.pending = false;
++			entry.failed = failed || text.isEmpty();
++			entry.result = failed ? QString() : text;
++			if (const auto current = _session->data().message(id)) {
++				toggleRound(current, entry);
++				_session->data().requestItemResize(current);
++			}
++		});
++		if (ok) {
++			return;
++		}
++		// fall through to official API
++		entry.requestId = 0;
++		entry.pending = false;
++	}
+ 	const auto requestId = _api.request(MTPmessages_TranscribeAudio(
+ 		item->history()->peer->input(),
+ 		MTP_int(item->id)
+--- a/Telegram/SourceFiles/history/view/history_view_transcribe_button.cpp
++++ b/Telegram/SourceFiles/history/view/history_view_transcribe_button.cpp
+@@ -23,6 +23,7 @@
+ #include "ui/painter.h"
+ #include "ui/rect.h"
+ #include "api/api_transcribes.h"
++#include "api/api_custom_transcribe.h"
+ #include "apiwrap.h"
+ #include "styles/style_chat.h"
+ #include "window/window_session_controller.h"
+@@ -334,6 +335,9 @@
+ 	if (session->premium()) {
+ 		return false;
+ 	}
++	if (!_summarize && Api::CustomTranscribeReady()) {
++		return false;
++	}
+ 	const auto transcribes = &session->api().transcribes();
+ 	if (_summarize) {
+ 		return transcribes->summary(_item).premiumRequired;
+@@ -378,7 +382,8 @@
+ 		if (!item) {
+ 			return;
+ 		}
+-		if (session->premium()) {
++		if (session->premium()
++			|| (!summarize && Api::CustomTranscribeReady())) {
+ 			auto &transcribes = session->api().transcribes();
+ 			return summarize
+ 				? transcribes.toggleSummary(item)
+--- a/Telegram/CMakeLists.txt
++++ b/Telegram/CMakeLists.txt
+@@ -1783,6 +1783,8 @@
+     noads/noads_ai_options.h
+     lang/translate_llm_provider.cpp
+     lang/translate_llm_provider.h
++    api/api_custom_transcribe.cpp
++    api/api_custom_transcribe.h
+     settings/sections/settings_folders.cpp
+     settings/sections/settings_folders.h
+     settings/sections/settings_global_ttl.cpp

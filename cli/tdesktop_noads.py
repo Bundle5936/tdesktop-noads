@@ -775,8 +775,18 @@ def auto_heal_named_patch(src: Path, patch_path: Path) -> str:
         return auto_heal_patch(src, patch_path)
     if "premium" in name or name.startswith("0002"):
         return auto_heal_local_premium_patch(src, patch_path)
-    if "noads-page" in name or "settings" in name or name.startswith("0003"):
+    if "noads-page" in name or ("settings" in name and "0003" in name) or name.startswith("0003"):
         return auto_heal_settings_patch(src, patch_path)
+    if "llm" in name or "translate" in name or name.startswith("0004"):
+        # Structural heal: keep existing patch if only offset drift; otherwise require regen script.
+        # Try plain re-apply after refresh is done by caller; here just error with hint.
+        raise CliError(
+            "0004 llm-translate auto-heal: re-run scripts/gen_ai_patches.py against new tag"
+        )
+    if "stt" in name or "transcrib" in name or name.startswith("0005"):
+        raise CliError(
+            "0005 custom-stt auto-heal: re-run scripts/gen_ai_patches.py against new tag"
+        )
     raise CliError(f"no auto-heal strategy for {patch_path.name}")
 
 

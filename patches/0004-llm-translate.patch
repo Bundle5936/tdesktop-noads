@@ -1,0 +1,383 @@
+--- a/Telegram/SourceFiles/noads/noads_ai_options.h
++++ b/Telegram/SourceFiles/noads/noads_ai_options.h
+@@ -0,0 +1,107 @@
++/*
++This file is part of tdesktop-noads patches for Telegram Desktop.
++*/
++#pragma once
++
++#include "base/options.h"
++
++namespace NoAds {
++namespace Ai {
++
++inline constexpr auto kEnableTranslate = "noads-ai-translate";
++inline constexpr auto kBaseUrl = "noads-ai-base-url";
++inline constexpr auto kApiKey = "noads-ai-api-key";
++inline constexpr auto kModel = "noads-ai-model";
++inline constexpr auto kSystemPrompt = "noads-ai-system-prompt";
++
++inline constexpr auto kEnableStt = "noads-stt-enable";
++inline constexpr auto kSttBaseUrl = "noads-stt-base-url";
++inline constexpr auto kSttApiKey = "noads-stt-api-key";
++inline constexpr auto kSttModel = "noads-stt-model";
++
++[[nodiscard]] inline QString DefaultBaseUrl() {
++	return u"https://api.openai.com/v1"_q;
++}
++
++[[nodiscard]] inline QString DefaultTranslateModel() {
++	return u"gpt-4o-mini"_q;
++}
++
++[[nodiscard]] inline QString DefaultSttModel() {
++	return u"whisper-1"_q;
++}
++
++[[nodiscard]] inline QString DefaultSystemPrompt() {
++	return u"You are a professional translator. Translate the user message into the target language. Preserve meaning, tone, and formatting (markdown/emoji) when possible. Output ONLY the translation, with no explanations."_q;
++}
++
++[[nodiscard]] inline bool TranslateEnabled() {
++	return base::options::lookup<bool>(kEnableTranslate).value();
++}
++
++[[nodiscard]] inline bool SttEnabled() {
++	return base::options::lookup<bool>(kEnableStt).value();
++}
++
++[[nodiscard]] inline QString TranslateBaseUrl() {
++	auto v = base::options::lookup<QString>(kBaseUrl).value().trimmed();
++	while (v.endsWith('/')) {
++		v.chop(1);
++	}
++	return v.isEmpty() ? DefaultBaseUrl() : v;
++}
++
++[[nodiscard]] inline QString TranslateApiKey() {
++	return base::options::lookup<QString>(kApiKey).value().trimmed();
++}
++
++[[nodiscard]] inline QString TranslateModel() {
++	const auto v = base::options::lookup<QString>(kModel).value().trimmed();
++	return v.isEmpty() ? DefaultTranslateModel() : v;
++}
++
++[[nodiscard]] inline QString SystemPrompt() {
++	const auto v = base::options::lookup<QString>(kSystemPrompt).value().trimmed();
++	return v.isEmpty() ? DefaultSystemPrompt() : v;
++}
++
++[[nodiscard]] inline QString SttBaseUrl() {
++	auto v = base::options::lookup<QString>(kSttBaseUrl).value().trimmed();
++	if (v.isEmpty()) {
++		return TranslateBaseUrl();
++	}
++	while (v.endsWith('/')) {
++		v.chop(1);
++	}
++	return v;
++}
++
++[[nodiscard]] inline QString SttApiKey() {
++	const auto v = base::options::lookup<QString>(kSttApiKey).value().trimmed();
++	return v.isEmpty() ? TranslateApiKey() : v;
++}
++
++[[nodiscard]] inline QString SttModel() {
++	const auto v = base::options::lookup<QString>(kSttModel).value().trimmed();
++	return v.isEmpty() ? DefaultSttModel() : v;
++}
++
++[[nodiscard]] inline bool TranslateReady() {
++	return TranslateEnabled()
++		&& !TranslateApiKey().isEmpty()
++		&& !TranslateBaseUrl().isEmpty()
++		&& !TranslateModel().isEmpty();
++}
++
++[[nodiscard]] inline bool SttReady() {
++	return SttEnabled()
++		&& !SttApiKey().isEmpty()
++		&& !SttBaseUrl().isEmpty()
++		&& !SttModel().isEmpty();
++}
++
++// Ensure options are registered (call from any TU that needs them).
++void RegisterOptions();
++
++} // namespace Ai
++} // namespace NoAds
+--- a/Telegram/SourceFiles/noads/noads_ai_options.cpp
++++ b/Telegram/SourceFiles/noads/noads_ai_options.cpp
+@@ -0,0 +1,89 @@
++/*
++This file is part of tdesktop-noads patches for Telegram Desktop.
++*/
++#include "noads/noads_ai_options.h"
++
++namespace NoAds {
++namespace Ai {
++namespace {
++
++base::options::toggle OptionEnableTranslate({
++	.id = kEnableTranslate,
++	.name = "启用 AI 翻译",
++	.description = "使用 OpenAI 兼容接口翻译（覆盖官方/URL/系统翻译）。需填写 API Key。",
++	.defaultValue = false,
++});
++
++base::options::option<QString> OptionBaseUrl({
++	.id = kBaseUrl,
++	.name = "AI Base URL",
++	.description = "OpenAI 兼容 API 根地址，例如 https://api.openai.com/v1",
++	.defaultValue = DefaultBaseUrl(),
++});
++
++base::options::option<QString> OptionApiKey({
++	.id = kApiKey,
++	.name = "AI API Key",
++	.description = "Bearer Token。仅保存在本机实验选项配置中。",
++	.defaultValue = QString(),
++});
++
++base::options::option<QString> OptionModel({
++	.id = kModel,
++	.name = "AI 翻译模型",
++	.description = "chat/completions 使用的模型名。",
++	.defaultValue = DefaultTranslateModel(),
++});
++
++base::options::option<QString> OptionSystemPrompt({
++	.id = kSystemPrompt,
++	.name = "AI 翻译系统提示词",
++	.description = "可自定义翻译风格；留空使用默认。",
++	.defaultValue = DefaultSystemPrompt(),
++});
++
++base::options::toggle OptionEnableStt({
++	.id = kEnableStt,
++	.name = "启用自定义语音转写",
++	.description = "使用 OpenAI 兼容 /audio/transcriptions。未配置时回退官方转写。",
++	.defaultValue = false,
++});
++
++base::options::option<QString> OptionSttBaseUrl({
++	.id = kSttBaseUrl,
++	.name = "STT Base URL",
++	.description = "可留空，默认复用 AI Base URL。",
++	.defaultValue = QString(),
++});
++
++base::options::option<QString> OptionSttApiKey({
++	.id = kSttApiKey,
++	.name = "STT API Key",
++	.description = "可留空，默认复用 AI API Key。",
++	.defaultValue = QString(),
++});
++
++base::options::option<QString> OptionSttModel({
++	.id = kSttModel,
++	.name = "STT 模型",
++	.description = "例如 whisper-1 或兼容模型名。",
++	.defaultValue = DefaultSttModel(),
++});
++
++} // namespace
++
++void RegisterOptions() {
++	// ODR-use options so they are constructed.
++	(void)OptionEnableTranslate.value();
++	(void)OptionBaseUrl.value();
++	(void)OptionApiKey.value();
++	(void)OptionModel.value();
++	(void)OptionSystemPrompt.value();
++	(void)OptionEnableStt.value();
++	(void)OptionSttBaseUrl.value();
++	(void)OptionSttApiKey.value();
++	(void)OptionSttModel.value();
++}
++
++} // namespace Ai
++} // namespace NoAds
+--- a/Telegram/SourceFiles/lang/translate_llm_provider.h
++++ b/Telegram/SourceFiles/lang/translate_llm_provider.h
+@@ -0,0 +1,12 @@
++/*
++This file is part of tdesktop-noads patches for Telegram Desktop.
++*/
++#pragma once
++
++#include "translate_provider.h"
++
++namespace Ui {
++
++[[nodiscard]] std::unique_ptr<TranslateProvider> CreateLlmTranslateProvider();
++
++} // namespace Ui
+--- a/Telegram/SourceFiles/lang/translate_llm_provider.cpp
++++ b/Telegram/SourceFiles/lang/translate_llm_provider.cpp
+@@ -0,0 +1,128 @@
++/*
++This file is part of tdesktop-noads patches for Telegram Desktop.
++*/
++#include "lang/translate_llm_provider.h"
++
++#include "noads/noads_ai_options.h"
++
++#include <QtCore/QJsonArray>
++#include <QtCore/QJsonDocument>
++#include <QtCore/QJsonObject>
++#include <QtCore/QJsonParseError>
++#include <QtNetwork/QNetworkAccessManager>
++#include <QtNetwork/QNetworkReply>
++#include <QtNetwork/QNetworkRequest>
++
++namespace Ui {
++namespace {
++
++class LlmTranslateProvider final : public TranslateProvider {
++public:
++	LlmTranslateProvider() {
++		NoAds::Ai::RegisterOptions();
++	}
++
++	[[nodiscard]] bool supportsMessageId() const override {
++		return false;
++	}
++
++	void request(
++			TranslateProviderRequest request,
++			LanguageId to,
++			Fn<void(TranslateProviderResult)> done) override {
++		if (request.text.text.trimmed().isEmpty()) {
++			done({ .error = TranslateProviderError::Unknown });
++			return;
++		}
++		if (!NoAds::Ai::TranslateReady()) {
++			done({ .error = TranslateProviderError::Unknown });
++			return;
++		}
++
++		const auto base = NoAds::Ai::TranslateBaseUrl();
++		const auto key = NoAds::Ai::TranslateApiKey();
++		const auto model = NoAds::Ai::TranslateModel();
++		const auto toCode = to.twoLetterCode();
++		auto system = NoAds::Ai::SystemPrompt();
++		if (!toCode.isEmpty()) {
++			system += u"\nTarget language code: "_q + toCode + u"."_q;
++		}
++
++		auto messages = QJsonArray();
++		messages.append(QJsonObject{
++			{ u"role"_q, u"system"_q },
++			{ u"content"_q, system },
++		});
++		messages.append(QJsonObject{
++			{ u"role"_q, u"user"_q },
++			{ u"content"_q, request.text.text },
++		});
++		const auto body = QJsonDocument(QJsonObject{
++			{ u"model"_q, model },
++			{ u"temperature"_q, 0.2 },
++			{ u"messages"_q, messages },
++		}).toJson(QJsonDocument::Compact);
++
++		auto net = QNetworkRequest(QUrl(base + u"/chat/completions"_q));
++		net.setHeader(
++			QNetworkRequest::ContentTypeHeader,
++			u"application/json"_q);
++		net.setRawHeader("Authorization", ("Bearer " + key).toUtf8());
++
++		const auto reply = _network.post(net, body);
++		QObject::connect(reply, &QNetworkReply::finished, [=] {
++			auto finish = [&](TranslateProviderResult result) {
++				done(std::move(result));
++				reply->deleteLater();
++			};
++			if (reply->error() != QNetworkReply::NoError) {
++				finish({ .error = TranslateProviderError::Unknown });
++				return;
++			}
++			auto parseError = QJsonParseError();
++			const auto doc = QJsonDocument::fromJson(
++				reply->readAll(),
++				&parseError);
++			if (parseError.error != QJsonParseError::NoError
++				|| !doc.isObject()) {
++				finish({ .error = TranslateProviderError::Unknown });
++				return;
++			}
++			const auto choices = doc.object().value(u"choices"_q).toArray();
++			if (choices.isEmpty()) {
++				finish({ .error = TranslateProviderError::Unknown });
++				return;
++			}
++			const auto msg = choices.at(0).toObject()
++				.value(u"message"_q).toObject();
++			auto content = msg.value(u"content"_q).toString().trimmed();
++			if (content.isEmpty() && msg.value(u"content"_q).isArray()) {
++				for (const auto &part : msg.value(u"content"_q).toArray()) {
++					if (part.isString()) {
++						content += part.toString();
++					} else if (part.isObject()) {
++						content += part.toObject().value(u"text"_q).toString();
++					}
++				}
++				content = content.trimmed();
++			}
++			if (content.isEmpty()) {
++				finish({ .error = TranslateProviderError::Unknown });
++				return;
++			}
++			finish({ .text = TextWithEntities{ content } });
++		});
++	}
++
++private:
++	QNetworkAccessManager _network;
++
++};
++
++} // namespace
++
++std::unique_ptr<TranslateProvider> CreateLlmTranslateProvider() {
++	return std::make_unique<LlmTranslateProvider>();
++}
++
++} // namespace Ui
+--- a/Telegram/SourceFiles/lang/translate_provider.cpp
++++ b/Telegram/SourceFiles/lang/translate_provider.cpp
+@@ -16,6 +16,8 @@
+ #include "history/history_item.h"
+ #include "lang/translate_mtproto_provider.h"
+ #include "lang/translate_url_provider.h"
++#include "lang/translate_llm_provider.h"
++#include "noads/noads_ai_options.h"
+ #include "platform/platform_translate_provider.h"
+ 
+ namespace {
+@@ -33,6 +35,10 @@
+ 
+ std::unique_ptr<TranslateProvider> CreateTranslateProvider(
+ 		not_null<Main::Session*> session) {
++	NoAds::Ai::RegisterOptions();
++	if (NoAds::Ai::TranslateReady()) {
++		return CreateLlmTranslateProvider();
++	}
+ 	const auto urlTemplate = OptionTranslateUrlTemplate.value();
+ 	if (!urlTemplate.isEmpty()
+ 		&& urlTemplate.contains(u"%q"_q)) {
+--- a/Telegram/CMakeLists.txt
++++ b/Telegram/CMakeLists.txt
+@@ -1779,6 +1779,10 @@
+     settings/settings_experimental.h
+     settings/settings_noads.cpp
+     settings/settings_noads.h
++    noads/noads_ai_options.cpp
++    noads/noads_ai_options.h
++    lang/translate_llm_provider.cpp
++    lang/translate_llm_provider.h
+     settings/sections/settings_folders.cpp
+     settings/sections/settings_folders.h
+     settings/sections/settings_global_ttl.cpp

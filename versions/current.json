@@ -1,15 +1,17 @@
 {
   "upstream_repo": "telegramdesktop/tdesktop",
   "tag": "v7.0.4",
-  "checked_at": "2026-07-21T19:09:53Z",
+  "checked_at": "2026-07-22T11:55:00Z",
   "published_at": "2026-07-21T15:06:05Z",
   "html_url": "https://github.com/telegramdesktop/tdesktop/releases/tag/v7.0.4",
   "patches": [
     "patches/0001-no-sponsored-messages.patch",
     "patches/0002-local-premium.patch",
-    "patches/0003-settings-noads-page.patch"
+    "patches/0003-settings-noads-page.patch",
+    "patches/0004-llm-translate.patch",
+    "patches/0005-custom-stt.patch"
   ],
   "patch_status": "ok",
   "healed": false,
-  "notes": "Auto-followed v7.0.4; existing patches apply."
+  "notes": "AI LLM translate + custom STT (OpenAI-compatible). Settings: 去广告 / AI / 语音"
 }
