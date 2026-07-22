@@ -201,13 +201,64 @@ jobs:
         run: |
           find "$LibrariesPath" '(' '(' ! '(' -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' ')' -type f ')' -o -empty ')' -delete || true
 
+      - name: Harden CMake against CMP0218
+        shell: bash
+        run: |
+          set -euo pipefail
+          # GHA CMake treats unset CMP0218 as error when cmark sets
+          # CMAKE_*_DEPRECATED. run_cmake.py also forces -Werror=dev which
+          # elevates policy warnings. Fix both.
+          python - <<'PY'
+          from pathlib import Path
+          import os, re
+
+          root = Path(os.environ["TBUILD"]) / "tdesktop"
+          if not root.is_dir():
+              raise SystemExit(f"missing {root}")
+
+          # 1) Patch run_cmake.py so policy errors are not fatal
+          for p in root.glob("**/run_cmake.py"):
+              t = p.read_text(encoding="utf-8", errors="replace")
+              old = "cmake.extend(['-Werror=dev', '-Werror=deprecated', '--warn-uninitialized'"
+              new = "cmake.extend(['-Wno-error=policy', '-Wno-error=author', '-Werror=dev', '-Werror=deprecated', '--warn-uninitialized'"
+              if old in t and "-Wno-error=policy" not in t:
+                  p.write_text(t.replace(old, new, 1), encoding="utf-8", newline="\n")
+                  print("patched run_cmake", p)
+              elif "-Wno-error=policy" in t:
+                  print("run_cmake already hardened", p)
+              else:
+                  print("run_cmake pattern miss", p)
+
+          # 2) Set CMP0218 NEW in cmark CMakeLists that touch deprecated vars
+          candidates = list(root.glob("**/cmark*/**/CMakeLists.txt"))
+          candidates += list(root.glob("**/cmark*/CMakeLists.txt"))
+          candidates += list(root.glob("cmake/external/**/CMakeLists.txt"))
+          patched = 0
+          inject = (
+              "# tdesktop-noads: silence CMP0218 on newer CMake\n"
+              "if(POLICY CMP0218)\n"
+              "  cmake_policy(SET CMP0218 NEW)\n"
+              "endif()\n"
+          )
+          for p in sorted(set(candidates)):
+              t = p.read_text(encoding="utf-8", errors="replace")
+              if "CMP0218" in t:
+                  continue
+              if "CMAKE_WARN_DEPRECATED" not in t and "CMAKE_ERROR_DEPRECATED" not in t:
+                  continue
+              m = re.search(r"^(cmake_minimum_required\([^\n]*\)\s*\n)", t, re.M)
+              t2 = (t[: m.end()] + inject + t[m.end():]) if m else (inject + t)
+              p.write_text(t2, encoding="utf-8", newline="\n")
+              patched += 1
+              print("patched cmark policy", p)
+          print("cmark_patched", patched)
+          PY
+
       - name: Configure + build Release
         run: |
           cd %TBUILD%\tdesktop\Telegram
           rem Newer CMake on GHA treats unset CMP0218 as error in cmark_gfm.
-          rem Upstream is not yet fixed; suppress policy-as-error for configure.
           call configure.bat x64 ^
-            -Wno-error=policy ^
             -D TDESKTOP_API_ID=${{ steps.meta.outputs.api_id }} ^
             -D TDESKTOP_API_HASH=${{ steps.meta.outputs.api_hash }} ^
             -D CMAKE_CONFIGURATION_TYPES=Release ^
