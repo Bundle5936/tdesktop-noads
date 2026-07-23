@@ -196,7 +196,7 @@ jobs:
 
       - name: Prepare libraries
         run: |
-          %TBUILD%\tdesktop\Telegram\build\prepare\win.bat skip-release silent
+          %TBUILD%\tdesktop\Telegram\build\prepare\win.bat silent
 
       - name: Free disk space
         shell: bash
