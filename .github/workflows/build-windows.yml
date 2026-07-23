@@ -155,6 +155,41 @@ jobs:
           # Prefer Win7-capable toolset used by upstream; fall back if runner lacks it.
           toolset: 14.44
 
+      # breakpad dump_syms needs ATL (atlbase.h); GHA VS image may omit it from INCLUDE.
+      - name: Install VS ATL
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (!(Test-Path $vswhere)) { throw "vswhere not found" }
+          $installPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $installPath) { throw "VS install path not found" }
+          $setup = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          $components = @(
+            "Microsoft.VisualStudio.Component.VC.ATL",
+            "Microsoft.VisualStudio.Component.VC.ATLMFC"
+          )
+          $args = @("modify", "--installPath", $installPath, "--quiet", "--norestart", "--force")
+          foreach ($c in $components) { $args += @("--add", $c) }
+          Write-Host "Installing: $($components -join ', ') into $installPath"
+          $p = Start-Process -FilePath $setup -ArgumentList $args -Wait -PassThru
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
+            throw "VS setup failed with exit code $($p.ExitCode)"
+          }
+          $atl = Get-ChildItem -Path "$installPath\VC\Tools\MSVC" -Recurse -Filter atlbase.h -ErrorAction SilentlyContinue | Select-Object -First 3
+          if (-not $atl) {
+            Write-Warning "atlbase.h still not found after ATL install; dump_syms skip will cover it"
+          } else {
+            $atl | ForEach-Object { Write-Host "found $($_.FullName)" }
+          }
+
+      # Re-enter MSVC env so INCLUDE picks up ATL after component install.
+      - name: Refresh Native Tools after ATL
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+          sdk: ${{ env.SDK }}
+          toolset: 14.44
+
       - name: NuGet sources
         run: |
           nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
@@ -193,6 +228,38 @@ jobs:
           key: win-x64-qt-${{ env.CACHE_KEY }}
           restore-keys: |
             win-x64-qt-
+
+      # dump_syms is only for symbol tooling; portable build disables crash reports.
+      # Even with ATL installed, skip it to keep prepare robust on GHA images.
+      - name: Skip breakpad dump_syms
+        shell: bash
+        run: |
+          set -euo pipefail
+          PREPARE="$TBUILD/tdesktop/Telegram/build/prepare/prepare.py"
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          p = Path(os.environ["TBUILD"]) / "tdesktop/Telegram/build/prepare/prepare.py"
+          t = p.read_text(encoding="utf-8")
+          old = (
+              "    cd tools\\windows\\dump_syms\n"
+              "    gyp dump_syms.gyp --format=msvs\n"
+              "    msbuild -m dump_syms.vcxproj /property:Configuration=Release /property:Platform=\"x64\" %ToolsetProp%"
+          )
+          new = (
+              "    rem tdesktop-noads: skip dump_syms (crash reports disabled)\n"
+              "    echo skip dump_syms"
+          )
+          if old not in t:
+              # tolerate already-patched or upstream layout change
+              if "skip dump_syms" in t:
+                  print("dump_syms already skipped")
+              else:
+                  raise SystemExit("breakpad dump_syms block not found in prepare.py")
+          else:
+              p.write_text(t.replace(old, new, 1), encoding="utf-8", newline="\n")
+              print("patched prepare.py: skip dump_syms")
+          PY
 
       - name: Prepare libraries
         run: |
