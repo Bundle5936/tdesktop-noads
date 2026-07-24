@@ -191,15 +191,25 @@ jobs:
           import os
           p = Path(os.environ["TBUILD"]) / "tdesktop/Telegram/build/prepare/prepare.py"
           text = p.read_text(encoding="utf-8")
-          old = (
-              "    cd tools\\windows\\dump_syms\n"
-              "    gyp dump_syms.gyp --format=msvs\n"
-              "    msbuild -m dump_syms.vcxproj /property:Configuration=Release /property:Platform=\"x64\" %ToolsetProp%"
-          )
-          new = "    rem tdesktop-noads: skip dump_syms (crash reports disabled)\n    echo skip dump_syms"
-          if old not in text:
-              raise SystemExit("breakpad dump_syms block not found")
-          p.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
+          # prepare.py is a Python source file containing a raw build-script string,
+          # so its Windows path has two literal backslashes per separator.
+          lines = text.splitlines()
+          marker = '    cd tools\\\\windows\\\\dump_syms'
+          try:
+              index = lines.index(marker)
+          except ValueError:
+              raise SystemExit("breakpad dump_syms marker not found")
+          expected = [
+              '    gyp dump_syms.gyp --format=msvs',
+              '    msbuild -m dump_syms.vcxproj /property:Configuration=Release /property:Platform="x64" %ToolsetProp%',
+          ]
+          if lines[index + 1:index + 3] != expected:
+              raise SystemExit("unexpected breakpad dump_syms commands")
+          lines[index:index + 3] = [
+              '    rem tdesktop-noads: skip dump_syms (crash reports disabled)',
+              '    echo skip dump_syms',
+          ]
+          p.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
           PY
 
       # Release needs tg_angle.lib and avif.lib; do not use upstream's Debug-only skip-release mode.
