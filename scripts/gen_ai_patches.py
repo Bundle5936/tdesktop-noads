@@ -691,7 +691,7 @@ void StartWithDocument(
 			std::move(done));
 		return;
 	}
-	document->save(item->fullId(), QString());
+	document->save(Data::FileOrigin(item->fullId()), QString());
 	WaitLoadedThenUpload(
 		base::make_weak(&document->session()),
 		document->id,

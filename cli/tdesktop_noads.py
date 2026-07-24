@@ -56,11 +56,18 @@ def run(
     return subprocess.run(cmd, cwd=cwd, check=check, text=True)
 
 
+def github_headers(*, accept_json: bool = True) -> dict[str, str]:
+    headers = {"User-Agent": USER_AGENT}
+    if accept_json:
+        headers["Accept"] = "application/vnd.github+json"
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 def http_json(url: str) -> dict | list:
-    req = urllib.request.Request(
-        url,
-        headers={"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"},
-    )
+    req = urllib.request.Request(url, headers=github_headers())
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             return json.loads(resp.read().decode("utf-8"))
@@ -73,7 +80,7 @@ def http_json(url: str) -> dict | list:
 
 def http_download(url: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    req = urllib.request.Request(url, headers=github_headers(accept_json=False))
     log(f"download {url}")
     with urllib.request.urlopen(req, timeout=600) as resp, open(dest, "wb") as f:
         shutil.copyfileobj(resp, f)
@@ -220,21 +227,11 @@ def apply_patch(
     try:
         run(cmd, cwd=src)
     except subprocess.CalledProcessError as e:
-        log("git apply failed, trying patch(1)")
-        pcmd = ["patch", "-p1", "-i", str(patch.resolve())]
-        if check_only:
-            pcmd.insert(1, "--dry-run")
-        if reverse:
-            pcmd.insert(1, "-R")
-        try:
-            run(pcmd, cwd=src)
-        except (subprocess.CalledProcessError, FileNotFoundError) as e2:
-            raise CliError(
-                "patch failed. Upstream likely changed sponsored_messages.cpp.\n"
-                f"  patch: {patch}\n"
-                f"  git apply: {e}\n"
-                f"  patch: {e2}"
-            ) from e2
+        raise CliError(
+            "patch failed exact git-apply validation; upstream or patch content changed.\n"
+            f"  patch: {patch}\n"
+            f"  git apply: {e}"
+        ) from e
 
     action = "checked" if check_only else ("reversed" if reverse else "applied")
     log(f"patch {action}: {patch.name}")

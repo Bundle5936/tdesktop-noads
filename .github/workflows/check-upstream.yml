@@ -5,13 +5,16 @@ on:
     paths:
       - "patches/**"
       - "cli/**"
+      - "scripts/**"
       - "versions/**"
       - ".github/workflows/**"
   pull_request:
     paths:
       - "patches/**"
       - "cli/**"
+      - "scripts/**"
       - "versions/**"
+      - ".github/workflows/**"
 
 jobs:
   smoke:
@@ -22,10 +25,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: CLI + pin check
+      - name: Python and patch validation
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          python -m py_compile cli/*.py scripts/*.py
           python cli/tdesktop_noads.py --help
-          python cli/tdesktop_noads.py status
           TAG=$(python -c "import json; print(json.load(open('versions/current.json'))['tag'])")
           echo "Pinned: $TAG"
           python cli/tdesktop_noads.py check --tag "$TAG" --dry-run-only --no-keep-archive
+          git diff --check
+          git diff --exit-code -- patches/*.patch versions/current.json

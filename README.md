@@ -13,7 +13,7 @@
 | 开关 | 说明 |
 |------|------|
 | **禁用赞助广告** | 默认开；仅本客户端 |
-| **本地大会员** | 默认开；UI 伪装，**不能**解锁服务器权益 |
+| **本地大会员** | 默认开；仅覆盖部分使用 `Session::premium()` / `AmPremiumValue()` 的本地 UI 判断，**不能**解锁服务器权益，也不会覆盖所有直接读取用户 Premium 标志的界面 |
 
 ### AI 翻译（OpenAI 兼容，真 LLM）
 
@@ -38,7 +38,7 @@
 
 协议：`POST {base}/audio/transcriptions`（multipart：`model` + `file`）。
 
-未开启或失败配置时回退官方转写。
+未开启时使用官方转写。自定义 STT 请求失败后会尝试回退官方转写；非会员账号是否能使用该回退仍取决于官方服务端资格。
 
 ## 补丁列表
 
@@ -81,7 +81,8 @@ Release：`tportable-x64-noads-<version>.zip`
 
 - 非官方客户端  
 - API Key 费用与隐私自负  
-- localPremium ≠ 真 Premium  
+- localPremium ≠ 真 Premium，且只是部分本地 UI 伪装
+- API Key 保存在 Telegram Desktop 的本地 experimental-options JSON 中；PasswordInput 只负责界面遮罩，并非系统密钥库加密
 - 未签名可能触发 SmartScreen  
 
 ## License
