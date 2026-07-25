@@ -17,6 +17,7 @@ on:
   push:
     branches: [main]
     paths:
+      - "versions/current.json"
       - "patches/**"
       - ".github/workflows/build-windows.yml"
 
@@ -27,18 +28,25 @@ concurrency:
   group: build-windows-${{ inputs.tag || github.ref }}
   cancel-in-progress: false
 
+env:
+  PREPARE_PATH: Telegram/build/prepare/prepare.py
+  CACHE_EPOCH: v3
+  TOOLSET: "14.44"
+
 jobs:
-  windows-x64:
-    name: Windows x64 portable
+  prepare-libraries:
+    name: Prepare Windows Release libraries
     runs-on: windows-latest
     timeout-minutes: 360
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      ver: ${{ steps.meta.outputs.ver }}
+      sdk: ${{ steps.setup.outputs.sdk }}
+      cache_key: ${{ steps.setup.outputs.cache_key }}
 
     env:
       TDESKTOP_API_ID: ${{ secrets.TDESKTOP_API_ID }}
       TDESKTOP_API_HASH: ${{ secrets.TDESKTOP_API_HASH }}
-      PREPARE_PATH: Telegram/build/prepare/prepare.py
-      CACHE_EPOCH: v2
-      TOOLSET: "14.44"
 
     defaults:
       run:
@@ -76,23 +84,10 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "ver=${TAG#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Resolve API mode
-        id: api
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -n "${TDESKTOP_API_ID:-}" && -n "${TDESKTOP_API_HASH:-}" ]]; then
-            echo "source=secrets" >> "$GITHUB_OUTPUT"
-            echo "test=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning::TDESKTOP_API_ID/HASH not set; using upstream test mode."
-            echo "source=test" >> "$GITHUB_OUTPUT"
-            echo "test=true" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Prepare directories
         run: |
           if not exist %userprofile%\TBuild\Libraries mkdir %userprofile%\TBuild\Libraries
+          if exist %GITHUB_WORKSPACE%\TBuild rmdir %GITHUB_WORKSPACE%\TBuild
           mklink /d %GITHUB_WORKSPACE%\TBuild %userprofile%\TBuild
           echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>%GITHUB_ENV%
           echo LibrariesPath=%GITHUB_WORKSPACE%\TBuild\Libraries\win64>>%GITHUB_ENV%
@@ -105,29 +100,13 @@ jobs:
           submodules: recursive
           path: ${{ env.TBUILD }}/tdesktop
 
-      - name: Apply committed patches exactly
-        shell: bash
-        run: |
-          set -euo pipefail
-          python "$GITHUB_WORKSPACE/noads/scripts/apply_patches.py" \
-            --src "$TBUILD/tdesktop" \
-            --patches-dir "$GITHUB_WORKSPACE/noads/patches" \
-            --cli "$GITHUB_WORKSPACE/noads/cli/tdesktop_noads.py"
-          test -f "$TBUILD/tdesktop/Telegram/SourceFiles/settings/settings_noads.cpp"
-          test -f "$TBUILD/tdesktop/Telegram/SourceFiles/lang/translate_llm_provider.cpp"
-          test -f "$TBUILD/tdesktop/Telegram/SourceFiles/api/api_custom_transcribe.cpp"
-          grep -q 'OptionNoadsDisableAds' "$TBUILD/tdesktop/Telegram/SourceFiles/data/components/sponsored_messages.cpp"
-          grep -q 'OptionNoadsLocalPremium' "$TBUILD/tdesktop/Telegram/SourceFiles/main/main_session.cpp"
-          grep -q 'CreateLlmTranslateProvider' "$TBUILD/tdesktop/Telegram/SourceFiles/lang/translate_provider.cpp"
-          grep -q 'TryCustomTranscribe' "$TBUILD/tdesktop/Telegram/SourceFiles/api/api_transcribes.cpp"
-
       - name: Read SDK and compute cache key
+        id: setup
         shell: bash
         run: |
           set -euo pipefail
           DOCPATH="$TBUILD/tdesktop/docs/building-win.md"
           SDK=$(grep "SDK version" "$DOCPATH" | sed -r 's/.*\*\*(.*)\*\* SDK version.*/\1/')
-          echo "SDK=$SDK" >> "$GITHUB_ENV"
           {
             echo "$CACHE_EPOCH"
             echo "${{ runner.os }}-${{ runner.arch }}-x64"
@@ -137,7 +116,11 @@ jobs:
             sha256sum "$TBUILD/tdesktop/$PREPARE_PATH"
             sha256sum "$GITHUB_WORKSPACE/noads/.github/workflows/build-windows.yml"
           } > CACHE_KEY.txt
-          echo "CACHE_KEY=$(sha256sum CACHE_KEY.txt | awk '{print $1}')" >> "$GITHUB_ENV"
+          CACHE_KEY=$(sha256sum CACHE_KEY.txt | awk '{print $1}')
+          echo "sdk=$SDK" >> "$GITHUB_OUTPUT"
+          echo "cache_key=$CACHE_KEY" >> "$GITHUB_OUTPUT"
+          echo "SDK=$SDK" >> "$GITHUB_ENV"
+          echo "CACHE_KEY=$CACHE_KEY" >> "$GITHUB_ENV"
 
       - name: Match upstream MSVC debug flags
         shell: bash
@@ -191,8 +174,6 @@ jobs:
           import os
           p = Path(os.environ["TBUILD"]) / "tdesktop/Telegram/build/prepare/prepare.py"
           text = p.read_text(encoding="utf-8")
-          # prepare.py is a Python source file containing a raw build-script string,
-          # so its Windows path has two literal backslashes per separator.
           lines = text.splitlines()
           marker = '    cd tools\\\\windows\\\\dump_syms'
           try:
@@ -212,9 +193,108 @@ jobs:
           p.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
           PY
 
-      # Release needs tg_angle.lib and avif.lib; do not use upstream's Debug-only skip-release mode.
       - name: Prepare Release libraries
         run: '%TBUILD%\tdesktop\Telegram\build\prepare\win.bat silent'
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Windows library preparation"
+            echo "- tag: \`${{ steps.meta.outputs.tag }}\`"
+            echo "- cache key: \`${{ steps.setup.outputs.cache_key }}\`"
+            echo "- job: **${{ job.status }}**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  windows-x64:
+    name: Windows x64 portable
+    needs: prepare-libraries
+    if: needs.prepare-libraries.result == 'success'
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    env:
+      TDESKTOP_API_ID: ${{ secrets.TDESKTOP_API_ID }}
+      TDESKTOP_API_HASH: ${{ secrets.TDESKTOP_API_HASH }}
+      SDK: ${{ needs.prepare-libraries.outputs.sdk }}
+      CACHE_KEY: ${{ needs.prepare-libraries.outputs.cache_key }}
+
+    defaults:
+      run:
+        shell: cmd
+
+    steps:
+      - name: Checkout patch repo
+        uses: actions/checkout@v4
+        with:
+          path: noads
+          ref: main
+          fetch-depth: 0
+
+      - name: Prepare directories
+        run: |
+          if not exist %userprofile%\TBuild\Libraries mkdir %userprofile%\TBuild\Libraries
+          if exist %GITHUB_WORKSPACE%\TBuild rmdir %GITHUB_WORKSPACE%\TBuild
+          mklink /d %GITHUB_WORKSPACE%\TBuild %userprofile%\TBuild
+          echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>%GITHUB_ENV%
+          echo LibrariesPath=%GITHUB_WORKSPACE%\TBuild\Libraries\win64>>%GITHUB_ENV%
+
+      - name: Clone official tdesktop at tag
+        uses: actions/checkout@v4
+        with:
+          repository: telegramdesktop/tdesktop
+          ref: ${{ needs.prepare-libraries.outputs.tag }}
+          submodules: recursive
+          path: ${{ env.TBUILD }}/tdesktop
+
+      - name: Apply committed patches exactly
+        shell: bash
+        run: |
+          set -euo pipefail
+          python "$GITHUB_WORKSPACE/noads/scripts/apply_patches.py" \
+            --src "$TBUILD/tdesktop" \
+            --patches-dir "$GITHUB_WORKSPACE/noads/patches" \
+            --cli "$GITHUB_WORKSPACE/noads/cli/tdesktop_noads.py"
+          test -f "$TBUILD/tdesktop/Telegram/SourceFiles/settings/settings_noads.cpp"
+          test -f "$TBUILD/tdesktop/Telegram/SourceFiles/lang/translate_llm_provider.cpp"
+          test -f "$TBUILD/tdesktop/Telegram/SourceFiles/api/api_custom_transcribe.cpp"
+          grep -q 'OptionNoadsDisableAds' "$TBUILD/tdesktop/Telegram/SourceFiles/data/components/sponsored_messages.cpp"
+          grep -q 'OptionNoadsLocalPremium' "$TBUILD/tdesktop/Telegram/SourceFiles/main/main_session.cpp"
+          grep -q 'CreateLlmTranslateProvider' "$TBUILD/tdesktop/Telegram/SourceFiles/lang/translate_provider.cpp"
+          grep -q 'TryCustomTranscribe' "$TBUILD/tdesktop/Telegram/SourceFiles/api/api_transcribes.cpp"
+
+      - name: ThirdParty cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TBUILD }}\ThirdParty
+          key: ${{ runner.os }}-${{ runner.arch }}-third-party-${{ env.CACHE_KEY }}
+
+      - name: Libraries cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\*
+            !${{ env.LibrariesPath }}\cache_keys
+            !${{ env.LibrariesPath }}\[qQ]t[_-]*
+            ${{ env.LibrariesPath }}\cache_keys\*
+            !${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
+          key: ${{ runner.os }}-${{ runner.arch }}-x64-libs-${{ env.CACHE_KEY }}
+
+      - name: Qt cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\[qQ]t[_-]*
+            ${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
+          key: ${{ runner.os }}-${{ runner.arch }}-x64-qt-${{ env.CACHE_KEY }}
+
+      - name: Native Tools Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+          sdk: ${{ env.SDK }}
+          toolset: ${{ env.TOOLSET }}
 
       - name: Free disk space
         shell: bash
@@ -225,7 +305,7 @@ jobs:
         shell: cmd
         run: |
           cd %TBUILD%\tdesktop\Telegram
-          if "${{ steps.api.outputs.test }}"=="true" (
+          if "${{ env.TDESKTOP_API_ID }}"=="" (
             call configure.bat x64 ^
               -D TDESKTOP_API_TEST=ON ^
               -D CMAKE_CONFIGURATION_TYPES=Release ^
@@ -248,7 +328,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          VER="${{ steps.meta.outputs.ver }}"
+          VER="${{ needs.prepare-libraries.outputs.ver }}"
           OUT="$TBUILD/tdesktop/out/Release"
           STAGE="$GITHUB_WORKSPACE/portable-stage"
           rm -rf "$STAGE" && mkdir -p "$STAGE"
@@ -260,7 +340,7 @@ jobs:
           : > "$STAGE/portable"
           cat > "$STAGE/README-noads.txt" <<EOF
           tdesktop-noads portable Windows x64
-          Upstream: ${{ steps.meta.outputs.tag }}
+          Upstream: ${{ needs.prepare-libraries.outputs.tag }}
           Features: no sponsored messages, local Premium UI, OpenAI-compatible translation and STT.
           localPremium does not unlock server-verified Premium features.
           EOF
@@ -274,7 +354,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tportable-x64-noads-${{ steps.meta.outputs.ver }}
+          name: tportable-x64-noads-${{ needs.prepare-libraries.outputs.ver }}
           path: |
             ${{ steps.pack.outputs.zip_path }}
             ${{ steps.pack.outputs.sha_path }}
@@ -283,7 +363,7 @@ jobs:
       - name: Attach files to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.meta.outputs.tag }}
+          tag_name: ${{ needs.prepare-libraries.outputs.tag }}
           files: |
             ${{ steps.pack.outputs.zip_path }}
             ${{ steps.pack.outputs.sha_path }}
@@ -297,8 +377,7 @@ jobs:
         run: |
           {
             echo "## Windows portable build"
-            echo "- tag: \`${{ steps.meta.outputs.tag }}\`"
+            echo "- tag: \`${{ needs.prepare-libraries.outputs.tag }}\`"
             echo "- zip: \`${{ steps.pack.outputs.zip }}\`"
-            echo "- API mode: \`${{ steps.api.outputs.source }}\`"
             echo "- job: **${{ job.status }}**"
           } >> "$GITHUB_STEP_SUMMARY"
