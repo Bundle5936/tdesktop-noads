@@ -90,11 +90,32 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def latest_tag_from_redirect() -> str:
+    """从 GitHub 的 latest 重定向读取版本，避免占用 API 配额。"""
+    url = f"https://github.com/{UPSTREAM}/releases/latest"
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            final_url = response.geturl()
+    except urllib.error.HTTPError as e:
+        final_url = e.geturl() or ""
+    match = re.search(r"/releases/tag/([^/?#]+)", final_url)
+    if not match:
+        raise CliError(f"could not resolve latest release redirect: {final_url or url}")
+    return normalize_tag(match.group(1))
+
+
 def normalize_tag(tag: str | None) -> str:
     if not tag:
-        data = http_json(f"https://api.github.com/repos/{UPSTREAM}/releases/latest")
-        assert isinstance(data, dict)
-        tag = data["tag_name"]
+        try:
+            data = http_json(f"https://api.github.com/repos/{UPSTREAM}/releases/latest")
+            assert isinstance(data, dict)
+            tag = data["tag_name"]
+        except CliError as e:
+            if "HTTP 403" not in str(e) and "HTTP 429" not in str(e):
+                raise
+            log("GitHub API 限流，改用 releases/latest 重定向解析版本")
+            tag = latest_tag_from_redirect()
         log(f"latest release: {tag}")
     tag = str(tag)
     if not tag.startswith("v"):
@@ -877,12 +898,35 @@ def write_failure(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def minimal_release(tag: str) -> dict:
+    """API 限流时保留跟随流程所需的最小 Release 信息。"""
+    return {
+        "tag_name": tag,
+        "html_url": f"https://github.com/{UPSTREAM}/releases/tag/{tag}",
+        "published_at": None,
+        "body": "",
+    }
+
+
 def upstream_release(tag: str | None = None) -> dict:
     if tag:
         tag = normalize_tag(tag)
-        data = http_json(f"https://api.github.com/repos/{UPSTREAM}/releases/tags/{tag}")
+        try:
+            data = http_json(f"https://api.github.com/repos/{UPSTREAM}/releases/tags/{tag}")
+        except CliError as e:
+            if "HTTP 403" not in str(e) and "HTTP 429" not in str(e):
+                raise
+            log(f"GitHub API 限流，使用指定版本回退：{tag}")
+            return minimal_release(tag)
     else:
-        data = http_json(f"https://api.github.com/repos/{UPSTREAM}/releases/latest")
+        try:
+            data = http_json(f"https://api.github.com/repos/{UPSTREAM}/releases/latest")
+        except CliError as e:
+            if "HTTP 403" not in str(e) and "HTTP 429" not in str(e):
+                raise
+            tag = latest_tag_from_redirect()
+            log(f"GitHub API 限流，使用版本回退：{tag}")
+            return minimal_release(tag)
     assert isinstance(data, dict)
     return data
 

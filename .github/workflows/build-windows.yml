@@ -114,7 +114,6 @@ jobs:
             echo "$SDK"
             echo "${{ steps.meta.outputs.tag }}"
             sha256sum "$TBUILD/tdesktop/$PREPARE_PATH"
-            sha256sum "$GITHUB_WORKSPACE/noads/.github/workflows/build-windows.yml"
           } > CACHE_KEY.txt
           CACHE_KEY=$(sha256sum CACHE_KEY.txt | awk '{print $1}')
           echo "sdk=$SDK" >> "$GITHUB_OUTPUT"
@@ -145,6 +144,8 @@ jobs:
         with:
           path: ${{ env.TBUILD }}\ThirdParty
           key: ${{ runner.os }}-${{ runner.arch }}-third-party-${{ env.CACHE_KEY }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-third-party-
 
       - name: Libraries cache
         uses: actions/cache@v4
@@ -156,6 +157,8 @@ jobs:
             ${{ env.LibrariesPath }}\cache_keys\*
             !${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
           key: ${{ runner.os }}-${{ runner.arch }}-x64-libs-${{ env.CACHE_KEY }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-x64-libs-
 
       - name: Qt cache
         uses: actions/cache@v4
@@ -164,6 +167,8 @@ jobs:
             ${{ env.LibrariesPath }}\[qQ]t[_-]*
             ${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
           key: ${{ runner.os }}-${{ runner.arch }}-x64-qt-${{ env.CACHE_KEY }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-x64-qt-
 
       - name: Skip breakpad dump_syms
         shell: bash
@@ -269,6 +274,8 @@ jobs:
         with:
           path: ${{ env.TBUILD }}\ThirdParty
           key: ${{ runner.os }}-${{ runner.arch }}-third-party-${{ env.CACHE_KEY }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-third-party-
 
       - name: Libraries cache
         uses: actions/cache@v4
@@ -280,6 +287,8 @@ jobs:
             ${{ env.LibrariesPath }}\cache_keys\*
             !${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
           key: ${{ runner.os }}-${{ runner.arch }}-x64-libs-${{ env.CACHE_KEY }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-x64-libs-
 
       - name: Qt cache
         uses: actions/cache@v4
@@ -288,6 +297,8 @@ jobs:
             ${{ env.LibrariesPath }}\[qQ]t[_-]*
             ${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
           key: ${{ runner.os }}-${{ runner.arch }}-x64-qt-${{ env.CACHE_KEY }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-x64-qt-
 
       - name: Native Tools Command Prompt
         uses: ilammy/msvc-dev-cmd@v1
@@ -306,13 +317,13 @@ jobs:
         run: |
           cd %TBUILD%\tdesktop\Telegram
           if "${{ env.TDESKTOP_API_ID }}"=="" (
-            call configure.bat x64 ^
+            call configure.bat -G "Ninja Multi-Config" ^
               -D TDESKTOP_API_TEST=ON ^
               -D CMAKE_CONFIGURATION_TYPES=Release ^
               -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON ^
               -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON
           ) else (
-            call configure.bat x64 ^
+            call configure.bat -G "Ninja Multi-Config" ^
               -D TDESKTOP_API_ID=%TDESKTOP_API_ID% ^
               -D TDESKTOP_API_HASH=%TDESKTOP_API_HASH% ^
               -D CMAKE_CONFIGURATION_TYPES=Release ^
@@ -320,7 +331,7 @@ jobs:
               -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON
           )
           if errorlevel 1 exit /b 1
-          if not exist ..\out\ALL_BUILD.vcxproj exit /b 1
+          if not exist ..\out\build.ninja exit /b 1
           cmake --build ..\out --config Release --parallel
 
       - name: Package portable zip
