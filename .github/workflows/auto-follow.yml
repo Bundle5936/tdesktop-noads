@@ -14,6 +14,11 @@ on:
         type: boolean
         required: false
         default: false
+      build_windows:
+        description: "Also dispatch expensive Windows build (needs private Actions minutes)"
+        type: boolean
+        required: false
+        default: false
   repository_dispatch:
     types: [upstream-release]
 
@@ -133,15 +138,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Dispatch Windows build explicitly
-        if: steps.commit.outputs.committed == 'true'
+      - name: Dispatch Windows build only when explicitly requested
+        if: steps.commit.outputs.committed == 'true' && github.event_name == 'workflow_dispatch' && github.event.inputs.build_windows == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.follow.outputs.tag }}
         run: |
           set -euo pipefail
-          gh workflow run build-windows.yml --ref main -f tag="$TAG"
+          echo "Dispatching Windows build for $TAG"
+          gh workflow run build-windows.yml --ref main \
+            -f tag="$TAG" \
+            -f confirm_billing=true
 
       - name: Open issue if auto-heal failed
         if: steps.follow.outputs.patch_ok == 'false'

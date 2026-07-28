@@ -1,5 +1,11 @@
 name: build-windows
 
+# 重要：
+# 1. 私有仓库 GitHub Actions 免费额度有限（通常每月约 2000 分钟）。
+# 2. Windows 按 2 倍计费，一次完整 tdesktop 编译很容易烧掉 500~1500 分钟。
+# 3. 额度耗尽后，所有 workflow 都会在 0 步骤 / runner_id=0 时秒失败。
+# 4. 因此本 workflow 只允许手动触发，禁止 push 自动编译。
+
 on:
   workflow_dispatch:
     inputs:
@@ -7,6 +13,11 @@ on:
         description: "Upstream tag (empty = versions/current.json)"
         required: false
         default: ""
+      confirm_billing:
+        description: "I confirmed private Actions minutes remain available"
+        type: boolean
+        required: true
+        default: false
   workflow_call:
     inputs:
       tag:
@@ -14,30 +25,82 @@ on:
         type: string
         required: false
         default: ""
-  push:
-    branches: [main]
-    paths:
-      - "versions/current.json"
-      - "patches/**"
-      - "scripts/**"
-      - "cli/**"
-      - ".github/workflows/build-windows.yml"
 
 permissions:
   contents: write
 
 concurrency:
-  group: build-windows-${{ inputs.tag || github.ref }}
+  group: build-windows
   cancel-in-progress: false
 
 env:
   PREPARE_PATH: Telegram/build/prepare/prepare.py
-  CACHE_EPOCH: v4
+  CACHE_EPOCH: v5
   TOOLSET: "14.44"
 
 jobs:
+  guard:
+    name: Preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      ver: ${{ steps.meta.outputs.ver }}
+    steps:
+      - name: Refuse accidental expensive builds
+        if: github.event_name == 'workflow_dispatch' && inputs.confirm_billing != true
+        run: |
+          {
+            echo "## Windows build blocked"
+            echo
+            echo "This private repo previously exhausted free Actions minutes by long Windows builds."
+            echo
+            echo "Before running:"
+            echo "1. Open GitHub -> Settings -> Billing -> Actions"
+            echo "2. Confirm private minutes remain"
+            echo "3. Re-run workflow_dispatch with confirm_billing=true"
+            echo
+            echo "Windows minutes are billed at 2x."
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          exit 1
+
+      - name: Checkout patch repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve and validate tag
+        id: meta
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag || '' }}
+        run: |
+          set -euo pipefail
+          TAG="$INPUT_TAG"
+          if [[ -z "$TAG" ]]; then
+            TAG=$(python -c "import json; print(json.load(open('versions/current.json'))['tag'])")
+          fi
+          [[ "$TAG" == v* ]] || TAG="v$TAG"
+          [[ "$TAG" =~ ^v[0-9]+(\.[0-9]+){2,3}([.-][A-Za-z0-9._-]+)?$ ]] || {
+            echo "Invalid tag: $TAG" >&2
+            exit 1
+          }
+          PINNED=$(python -c "import json; print(json.load(open('versions/current.json'))['tag'])")
+          [[ "$TAG" == "$PINNED" ]] || {
+            echo "Requested tag $TAG does not match committed pin $PINNED" >&2
+            exit 1
+          }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "ver=${TAG#v}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Preflight OK"
+            echo "- tag: \`$TAG\`"
+            echo "- next job will use windows-latest and may consume hundreds of private minutes"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   windows-release:
     name: Windows x64 Release
+    needs: guard
     runs-on: windows-latest
     timeout-minutes: 360
 
@@ -104,35 +167,11 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Resolve and validate tag
-        id: meta
-        shell: bash
-        env:
-          INPUT_TAG: ${{ inputs.tag || github.event.inputs.tag || '' }}
-        run: |
-          set -euo pipefail
-          TAG="$INPUT_TAG"
-          if [[ -z "$TAG" ]]; then
-            TAG=$(python -c "import json; print(json.load(open('noads/versions/current.json'))['tag'])")
-          fi
-          [[ "$TAG" == v* ]] || TAG="v$TAG"
-          [[ "$TAG" =~ ^v[0-9]+(\.[0-9]+){2,3}([.-][A-Za-z0-9._-]+)?$ ]] || {
-            echo "Invalid tag: $TAG" >&2
-            exit 1
-          }
-          PINNED=$(python -c "import json; print(json.load(open('noads/versions/current.json'))['tag'])")
-          [[ "$TAG" == "$PINNED" ]] || {
-            echo "Requested tag $TAG does not match committed pin $PINNED" >&2
-            exit 1
-          }
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "ver=${TAG#v}" >> "$GITHUB_OUTPUT"
-
       - name: Checkout upstream tdesktop
         uses: actions/checkout@v4
         with:
           repository: telegramdesktop/tdesktop
-          ref: ${{ steps.meta.outputs.tag }}
+          ref: ${{ needs.guard.outputs.tag }}
           submodules: recursive
           path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}
 
@@ -165,7 +204,7 @@ jobs:
             echo "${{ runner.os }}-${{ runner.arch }}-x64"
             echo "$TOOLSET"
             echo "$SDK"
-            echo "${{ steps.meta.outputs.tag }}"
+            echo "${{ needs.guard.outputs.tag }}"
             sha256sum "$TBUILD/tdesktop/$PREPARE_PATH"
           } > CACHE_KEY.txt
           CACHE_KEY=$(sha256sum CACHE_KEY.txt | awk '{print $1}')
@@ -175,7 +214,6 @@ jobs:
           echo "sdk=$SDK" >> "$GITHUB_OUTPUT"
           echo "cache_key=$CACHE_KEY" >> "$GITHUB_OUTPUT"
           echo "patch_key=$PATCH_KEY" >> "$GITHUB_OUTPUT"
-
           echo "SDK=$SDK"
           echo "cache key=$CACHE_KEY"
           echo "patch key=$PATCH_KEY"
@@ -247,7 +285,6 @@ jobs:
           }
 
       - name: ThirdParty cache restore
-        id: cache-third-party
         uses: actions/cache/restore@v6
         with:
           path: ${{ env.TBUILD }}\ThirdParty
@@ -255,7 +292,6 @@ jobs:
           restore-keys: ${{ runner.os }}-${{ runner.arch }}-third-party-
 
       - name: Libraries cache restore
-        id: cache-libs
         uses: actions/cache/restore@v6
         with:
           path: |
@@ -268,7 +304,6 @@ jobs:
           restore-keys: ${{ runner.os }}-${{ runner.arch }}-x64-libs-rel-
 
       - name: Qt cache restore
-        id: cache-qt
         uses: actions/cache/restore@v6
         with:
           path: |
@@ -321,7 +356,7 @@ jobs:
           _CL_: /MP2
         run: |
           cd %TBUILD%\%REPO_NAME%\Telegram
-          set "CFG_FLAGS=tag=${{ steps.meta.outputs.tag }} patch=${{ steps.setup.outputs.patch_key }} api=%TDESKTOP_API_ID% win7=on"
+          set "CFG_FLAGS=tag=${{ needs.guard.outputs.tag }} patch=${{ steps.setup.outputs.patch_key }} api=%TDESKTOP_API_ID% win7=on"
           set "CFG_MARKER=..\out\.ci_configure_flags"
           set "REUSE_TREE=0"
           if exist ..\out\CMakeCache.txt if exist "%CFG_MARKER%" (
@@ -363,7 +398,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          VER="${{ steps.meta.outputs.ver }}"
+          VER="${{ needs.guard.outputs.ver }}"
           OUT="$TBUILD/tdesktop/out/Release"
           STAGE="$GITHUB_WORKSPACE/portable-stage"
           rm -rf "$STAGE"
@@ -376,7 +411,7 @@ jobs:
           : > "$STAGE/portable"
           cat > "$STAGE/README-noads.txt" <<EOF
           tdesktop-noads portable Windows x64
-          Upstream: ${{ steps.meta.outputs.tag }}
+          Upstream: ${{ needs.guard.outputs.tag }}
           Features: no sponsored messages, local Premium UI, OpenAI-compatible translation and STT.
           localPremium does not unlock server-verified Premium features.
           EOF
@@ -390,7 +425,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tportable-x64-noads-${{ steps.meta.outputs.ver }}
+          name: tportable-x64-noads-${{ needs.guard.outputs.ver }}
           path: |
             ${{ steps.pack.outputs.zip_path }}
             ${{ steps.pack.outputs.sha_path }}
@@ -399,7 +434,7 @@ jobs:
       - name: Attach files to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.meta.outputs.tag }}
+          tag_name: ${{ needs.guard.outputs.tag }}
           files: |
             ${{ steps.pack.outputs.zip_path }}
             ${{ steps.pack.outputs.sha_path }}
@@ -413,7 +448,7 @@ jobs:
         run: |
           {
             echo "## Windows x64 Release"
-            echo "- tag: \`${{ steps.meta.outputs.tag }}\`"
+            echo "- tag: \`${{ needs.guard.outputs.tag }}\`"
             echo "- zip: \`${{ steps.pack.outputs.zip }}\`"
             echo "- job: **${{ job.status }}**"
           } >> "$GITHUB_STEP_SUMMARY"
