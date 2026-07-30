@@ -350,24 +350,58 @@ jobs:
             ${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
           key: ${{ runner.os }}-${{ runner.arch }}-x64-qt-rel-${{ env.CACHE_KEY }}-${{ github.run_id }}
 
+      # 官方 configure.py：只要存在 Telegram/build/target，就会走“正式目标”分支，
+      # 并强制读取 ../../DesktopPrivate/custom_api_id.h。没有这个文件会直接失败。
+      - name: Set up DesktopPrivate API credentials
+        shell: bash
+        env:
+          API_ID: ${{ secrets.TDESKTOP_API_ID }}
+          API_HASH: ${{ secrets.TDESKTOP_API_HASH }}
+        run: |
+          set -euo pipefail
+          private="$TBUILD/DesktopPrivate"
+          mkdir -p "$private"
+
+          # 优先用仓库 Secrets；没有就用 TDLib 文档里的公开示例，
+          # 仅保证 CI 能编过。正式对外分发请到 my.telegram.org 申请自己的。
+          if [[ -z "${API_ID:-}" || -z "${API_HASH:-}" ]]; then
+            echo "Secrets TDESKTOP_API_ID/HASH 未配置，使用公开示例 API 凭据。" | tee -a "$GITHUB_STEP_SUMMARY"
+            API_ID="611335"
+            API_HASH="d524b414d21f4d37f08684c1df41ac9c"
+          else
+            echo "Using repository TDESKTOP_API_ID/HASH secrets." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # configure.py 只正则扫描这个文件拿 ApiId / ApiHash
+          cat > "$private/custom_api_id.h" <<EOF
+          static const int32 ApiId = ${API_ID};
+          static const char *ApiHash = "${API_HASH}";
+          EOF
+          # 去掉 heredoc 公共缩进
+          sed -i 's/^[[:space:]]*//' "$private/custom_api_id.h"
+
+          # 有 target 文件时，run_cmake 才会按正式 win64 目标处理
+          mkdir -p "$TBUILD/$REPO_NAME/Telegram/build"
+          printf '%s\n' "$BUILD_TARGET" > "$TBUILD/$REPO_NAME/Telegram/build/target"
+
+          echo "DesktopPrivate contents:"
+          ls -l "$private"
+          echo "build/target=$(cat "$TBUILD/$REPO_NAME/Telegram/build/target")"
+
       - name: Build Telegram Desktop Release
         env:
           _CL_: /MP2
         run: |
           cd %TBUILD%\%REPO_NAME%\Telegram
 
-          rem 官方 configure.py 靠 build/target 决定 arch；win64 => x64
-          if not exist build mkdir build
-          > build\target echo %BUILD_TARGET%
+          rem cmd 括号里 %VAR% 是解析期展开；这里不用括号，避免 QT_DIR 丢
+          if not "%QT_DIR%"=="" set "CMAKE_PREFIX_PATH=%QT_DIR%;%CMAKE_PREFIX_PATH%"
+          echo QT_DIR=%QT_DIR%
+          echo CMAKE_PREFIX_PATH=%CMAKE_PREFIX_PATH%
+          echo build/target:
           type build\target
 
-          rem 显式把自建 Qt 放进 CMake 搜索路径，避免 x64/x86 混淆后找不到
-          if defined QT_DIR (
-            set "CMAKE_PREFIX_PATH=%QT_DIR%;%CMAKE_PREFIX_PATH%"
-            echo CMAKE_PREFIX_PATH=%CMAKE_PREFIX_PATH%
-          )
-
-          set "CFG_FLAGS=tag=${{ needs.guard.outputs.tag }} patch=${{ steps.setup.outputs.patch_key }} target=%BUILD_TARGET% arch=x64 api=%TDESKTOP_API_ID% win7=on"
+          set "CFG_FLAGS=tag=${{ needs.guard.outputs.tag }} patch=${{ steps.setup.outputs.patch_key }} target=%BUILD_TARGET% arch=x64 win7=on"
           set "CFG_MARKER=..\out\.ci_configure_flags"
           set "REUSE_TREE=0"
           if exist ..\out\CMakeCache.txt if exist "%CFG_MARKER%" (
@@ -381,28 +415,16 @@ jobs:
           )
 
           echo Configuring the Release build tree for %BUILD_TARGET%/x64.
-          if "%TDESKTOP_API_ID%"=="" (
-            call configure.bat ^
-              x64 ^
-              -D TDESKTOP_API_TEST=ON ^
-              -D CMAKE_CONFIGURATION_TYPES=Release ^
-              -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON ^
-              -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON ^
-              -D DESKTOP_APP_WIN7_COMPAT=ON ^
-              -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT= ^
-              || exit /b 1
-          ) else (
-            call configure.bat ^
-              x64 ^
-              -D TDESKTOP_API_ID=%TDESKTOP_API_ID% ^
-              -D TDESKTOP_API_HASH=%TDESKTOP_API_HASH% ^
-              -D CMAKE_CONFIGURATION_TYPES=Release ^
-              -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON ^
-              -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON ^
-              -D DESKTOP_APP_WIN7_COMPAT=ON ^
-              -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT= ^
-              || exit /b 1
-          )
+          rem 有 build/target + DesktopPrivate 时，API 由 custom_api_id.h 注入；
+          rem 仍显式传 x64，避免生成器/工具链偏到 x86。
+          call configure.bat ^
+            x64 ^
+            -D CMAKE_CONFIGURATION_TYPES=Release ^
+            -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON ^
+            -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON ^
+            -D DESKTOP_APP_WIN7_COMPAT=ON ^
+            -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT= ^
+            || exit /b 1
           > "%CFG_MARKER%" echo %CFG_FLAGS%
           :build
           cmake --build ..\out --config Release --target Telegram --parallel 2 || exit /b 1
