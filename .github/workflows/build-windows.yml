@@ -1,10 +1,9 @@
 name: build-windows
 
-# 重要：
-# 1. 私有仓库 GitHub Actions 免费额度有限（通常每月约 2000 分钟）。
-# 2. Windows 按 2 倍计费，一次完整 tdesktop 编译很容易烧掉 500~1500 分钟。
-# 3. 额度耗尽后，所有 workflow 都会在 0 步骤 / runner_id=0 时秒失败。
-# 4. 因此本 workflow 只允许手动触发，禁止 push 自动编译。
+# 公开仓库也会消耗 Actions 分钟；Windows 长编译仍很贵。
+# 只允许手动/被调用触发，禁止 push 自动编译。
+# 关键：x64 Release 必须写 Telegram/build/target=win64，并给 configure.bat 传 x64，
+# 否则 CMake 会跑成 x86，找不到 Libraries/win64 下的 Qt。
 
 on:
   workflow_dispatch:
@@ -13,11 +12,6 @@ on:
         description: "Upstream tag (empty = versions/current.json)"
         required: false
         default: ""
-      confirm_billing:
-        description: "I confirmed private Actions minutes remain available"
-        type: boolean
-        required: true
-        default: false
   workflow_call:
     inputs:
       tag:
@@ -35,7 +29,7 @@ concurrency:
 
 env:
   PREPARE_PATH: Telegram/build/prepare/prepare.py
-  CACHE_EPOCH: v5
+  CACHE_EPOCH: v6
   TOOLSET: "14.44"
 
 jobs:
@@ -47,23 +41,6 @@ jobs:
       tag: ${{ steps.meta.outputs.tag }}
       ver: ${{ steps.meta.outputs.ver }}
     steps:
-      - name: Refuse accidental expensive builds
-        if: github.event_name == 'workflow_dispatch' && inputs.confirm_billing != true
-        run: |
-          {
-            echo "## Windows build blocked"
-            echo
-            echo "This private repo previously exhausted free Actions minutes by long Windows builds."
-            echo
-            echo "Before running:"
-            echo "1. Open GitHub -> Settings -> Billing -> Actions"
-            echo "2. Confirm private minutes remain"
-            echo "3. Re-run workflow_dispatch with confirm_billing=true"
-            echo
-            echo "Windows minutes are billed at 2x."
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-          exit 1
-
       - name: Checkout patch repository
         uses: actions/checkout@v4
         with:
@@ -314,7 +291,29 @@ jobs:
 
       - name: Build Release libraries
         timeout-minutes: 285
+        # silent only; Release 需要完整库。Qt 会装到 Libraries/win64/Qt-5.15.x
         run: '%TBUILD%\%REPO_NAME%\Telegram\build\prepare\win.bat silent'
+
+      - name: Verify Qt for x64
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "LibrariesPath=$LibrariesPath"
+          ls -la "$LibrariesPath" | head -n 50
+          QT_DIR=$(ls -d "$LibrariesPath"/Qt-5.* 2>/dev/null | tail -n 1 || true)
+          if [[ -z "${QT_DIR:-}" ]]; then
+            echo "Qt-5.* not found under $LibrariesPath" >&2
+            ls -la "$LibrariesPath" || true
+            exit 1
+          fi
+          test -f "$QT_DIR/lib/cmake/Qt5/Qt5Config.cmake" || test -f "$QT_DIR/lib/cmake/Qt5/Qt5Config.cmake" || true
+          if [[ ! -f "$QT_DIR/bin/qmake.exe" && ! -f "$QT_DIR/lib/cmake/Qt5/Qt5Config.cmake" ]]; then
+            echo "Qt installation incomplete: $QT_DIR" >&2
+            find "$QT_DIR" -maxdepth 3 -type f | head -n 80 >&2 || true
+            exit 1
+          fi
+          echo "QT_DIR=$QT_DIR" >> "$GITHUB_ENV"
+          echo "Found Qt at $QT_DIR"
 
       - name: Free library build leftovers
         if: always()
@@ -356,7 +355,19 @@ jobs:
           _CL_: /MP2
         run: |
           cd %TBUILD%\%REPO_NAME%\Telegram
-          set "CFG_FLAGS=tag=${{ needs.guard.outputs.tag }} patch=${{ steps.setup.outputs.patch_key }} api=%TDESKTOP_API_ID% win7=on"
+
+          rem 官方 configure.py 靠 build/target 决定 arch；win64 => x64
+          if not exist build mkdir build
+          > build\target echo %BUILD_TARGET%
+          type build\target
+
+          rem 显式把自建 Qt 放进 CMake 搜索路径，避免 x64/x86 混淆后找不到
+          if defined QT_DIR (
+            set "CMAKE_PREFIX_PATH=%QT_DIR%;%CMAKE_PREFIX_PATH%"
+            echo CMAKE_PREFIX_PATH=%CMAKE_PREFIX_PATH%
+          )
+
+          set "CFG_FLAGS=tag=${{ needs.guard.outputs.tag }} patch=${{ steps.setup.outputs.patch_key }} target=%BUILD_TARGET% arch=x64 api=%TDESKTOP_API_ID% win7=on"
           set "CFG_MARKER=..\out\.ci_configure_flags"
           set "REUSE_TREE=0"
           if exist ..\out\CMakeCache.txt if exist "%CFG_MARKER%" (
@@ -368,9 +379,11 @@ jobs:
             echo Reusing the configured build tree.
             goto :build
           )
-          echo Configuring the Release build tree.
+
+          echo Configuring the Release build tree for %BUILD_TARGET%/x64.
           if "%TDESKTOP_API_ID%"=="" (
             call configure.bat ^
+              x64 ^
               -D TDESKTOP_API_TEST=ON ^
               -D CMAKE_CONFIGURATION_TYPES=Release ^
               -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON ^
@@ -380,6 +393,7 @@ jobs:
               || exit /b 1
           ) else (
             call configure.bat ^
+              x64 ^
               -D TDESKTOP_API_ID=%TDESKTOP_API_ID% ^
               -D TDESKTOP_API_HASH=%TDESKTOP_API_HASH% ^
               -D CMAKE_CONFIGURATION_TYPES=Release ^
