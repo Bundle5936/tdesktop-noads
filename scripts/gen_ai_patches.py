@@ -774,7 +774,6 @@ This file is part of tdesktop-noads patches for Telegram Desktop.
 #include "ui/vertical_list.h"
 #include "ui/widgets/buttons.h"
 #include "ui/widgets/fields/input_field.h"
-#include "ui/widgets/fields/password_input.h"
 #include "ui/widgets/labels.h"
 #include "ui/wrap/vertical_layout.h"
 #include "window/window_session_controller.h"
@@ -813,10 +812,11 @@ void AddToggle(
 	}
 }
 
+// Use InputField for all string options; it is a Ui::RpWidget and can be added
+// directly to VerticalLayout.
 void AddStringOption(
 		not_null<Ui::VerticalLayout*> container,
-		const char *optionId,
-		bool password = false) {
+		const char *optionId) {
 	auto &option = base::options::lookup<QString>(optionId);
 	const auto title = option.name().isEmpty()
 		? QString::fromUtf8(optionId)
@@ -830,41 +830,21 @@ void AddStringOption(
 			st::boxLabel),
 		st::defaultBoxDividerLabelPadding);
 
-	if (password) {
-		const auto field = container->add(
-			object_ptr<Ui::PasswordInput>(
-				container,
-				st::defaultInputField,
-				rpl::single(title),
-				option.value()),
-			st::defaultBoxDividerLabelPadding);
-		QObject::connect(
-			field,
-			&Ui::PasswordInput::submitted,
-			field,
-			[=, &option] { option.set(field->getLastText().trimmed()); });
-		QObject::connect(
-			field,
-			&Ui::PasswordInput::changed,
-			field,
-			[=, &option] { option.set(field->getLastText()); });
-	} else {
-		const auto field = container->add(
-			object_ptr<Ui::InputField>(
-				container,
-				st::defaultInputField,
-				rpl::single(title),
-				option.value()),
-			st::defaultBoxDividerLabelPadding);
-		field->submits(
-		) | rpl::on_next([=, &option] {
-			option.set(field->getLastText().trimmed());
-		}, field->lifetime());
-		field->changes(
-		) | rpl::on_next([=, &option] {
-			option.set(field->getLastText());
-		}, field->lifetime());
-	}
+	const auto field = container->add(
+		object_ptr<Ui::InputField>(
+			container,
+			st::defaultInputField,
+			rpl::single(title),
+			option.value()),
+		st::defaultBoxDividerLabelPadding);
+	field->submits(
+	) | rpl::on_next([=, &option] {
+		option.set(field->getLastText().trimmed());
+	}, field->lifetime());
+	field->changes(
+	) | rpl::on_next([=, &option] {
+		option.set(field->getLastText());
+	}, field->lifetime());
 
 	if (!option.description().isEmpty()) {
 		Ui::AddDividerText(container, rpl::single(option.description()));
@@ -914,7 +894,7 @@ void NoAds::setupContent() {
 
 	AddToggle(content, "noads-ai-translate");
 	AddStringOption(content, "noads-ai-base-url");
-	AddStringOption(content, "noads-ai-api-key", true);
+	AddStringOption(content, "noads-ai-api-key");
 	AddStringOption(content, "noads-ai-model");
 	AddStringOption(content, "noads-ai-system-prompt");
 
@@ -932,7 +912,7 @@ void NoAds::setupContent() {
 
 	AddToggle(content, "noads-stt-enable");
 	AddStringOption(content, "noads-stt-base-url");
-	AddStringOption(content, "noads-stt-api-key", true);
+	AddStringOption(content, "noads-stt-api-key");
 	AddStringOption(content, "noads-stt-model");
 
 	Ui::AddSkip(content);
