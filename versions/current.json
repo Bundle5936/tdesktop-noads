@@ -1,9 +1,9 @@
 {
   "upstream_repo": "telegramdesktop/tdesktop",
-  "tag": "v7.0.6",
-  "checked_at": "2026-07-28T19:10:36Z",
-  "published_at": "2026-07-27T17:10:24Z",
-  "html_url": "https://github.com/telegramdesktop/tdesktop/releases/tag/v7.0.6",
+  "tag": "v7.0.7",
+  "checked_at": "2026-08-01T08:06:17Z",
+  "published_at": "2026-08-01T03:29:19Z",
+  "html_url": "https://github.com/telegramdesktop/tdesktop/releases/tag/v7.0.7",
   "patches": [
     "patches/0001-no-sponsored-messages.patch",
     "patches/0002-local-premium.patch",
@@ -13,5 +13,5 @@
   ],
   "patch_status": "ok",
   "healed": false,
-  "notes": "Auto-followed v7.0.6; existing patches apply."
+  "notes": "Auto-followed v7.0.7; existing patches apply."
 }
