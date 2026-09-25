@@ -421,7 +421,7 @@
  TranslateProviderRequest PrepareTranslateProviderRequest(
 --- a/Telegram/CMakeLists.txt
 +++ b/Telegram/CMakeLists.txt
-@@ -1779,6 +1779,10 @@
+@@ -1859,6 +1859,10 @@
      settings/settings_experimental.h
      settings/settings_noads.cpp
      settings/settings_noads.h

@@ -426,7 +426,7 @@
  				? transcribes.toggleSummary(item)
 --- a/Telegram/CMakeLists.txt
 +++ b/Telegram/CMakeLists.txt
-@@ -1783,6 +1783,8 @@
+@@ -1863,6 +1863,8 @@
      noads/noads_ai_options.h
      lang/translate_llm_provider.cpp
      lang/translate_llm_provider.h
