@@ -9,9 +9,10 @@
     "patches/0002-local-premium.patch",
     "patches/0003-settings-noads-page.patch",
     "patches/0004-llm-translate.patch",
-    "patches/0005-custom-stt.patch"
+    "patches/0005-custom-stt.patch",
+    "patches/0006-mute-in-fullscreen.patch"
   ],
   "patch_status": "ok",
   "healed": false,
-  "notes": "Auto-followed v7.3.3; existing patches apply."
+  "notes": "Added 0006: mute notifications (toast+sound) in borderless fullscreen (QUNS_BUSY), with sound-only mode option."
 }

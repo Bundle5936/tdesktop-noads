@@ -1,0 +1,204 @@
+--- a/Telegram/CMakeLists.txt
++++ b/Telegram/CMakeLists.txt
+@@ -1946,6 +1946,8 @@
+     settings/settings_noads.h
+     noads/noads_ai_options.cpp
+     noads/noads_ai_options.h
++    noads/noads_notify_options.cpp
++    noads/noads_notify_options.h
+     lang/translate_llm_provider.cpp
+     lang/translate_llm_provider.h
+     api/api_custom_transcribe.cpp
+--- a/Telegram/SourceFiles/noads/noads_notify_options.cpp
++++ b/Telegram/SourceFiles/noads/noads_notify_options.cpp
+@@ -0,0 +1,40 @@
++/*
++This file is part of tdesktop-noads patches for Telegram Desktop.
++*/
++#include "noads/noads_notify_options.h"
++
++#include "base/options.h"
++
++namespace NoAds {
++namespace Notify {
++
++base::options::toggle OptionMuteInFullscreen({
++	.id = kMuteInFullscreen,
++	.name = "全屏时静音",
++	.description = "检测到无边框满屏应用（网页全屏 F11 / 视频全屏、游戏窗口化全屏、独占全屏）时抑制 Telegram 通知。",
++	.defaultValue = true,
++});
++
++base::options::toggle OptionMuteSoundOnly({
++	.id = kMuteSoundOnly,
++	.name = "仅静音，保留弹窗",
++	.description = "开启：全屏时不响铃，但仍弹出通知。关闭：全屏时弹窗与声音一起静默。",
++	.defaultValue = false,
++});
++
++void RegisterOptions() {
++	// ODR-use the options so this translation unit constructs them.
++	(void)OptionMuteInFullscreen.value();
++	(void)OptionMuteSoundOnly.value();
++}
++
++bool MuteInFullscreen() {
++	return OptionMuteInFullscreen.value();
++}
++
++bool MuteSoundOnly() {
++	return OptionMuteSoundOnly.value();
++}
++
++} // namespace Notify
++} // namespace NoAds
+--- a/Telegram/SourceFiles/noads/noads_notify_options.h
++++ b/Telegram/SourceFiles/noads/noads_notify_options.h
+@@ -0,0 +1,22 @@
++/*
++This file is part of tdesktop-noads patches for Telegram Desktop.
++*/
++#pragma once
++
++namespace NoAds {
++namespace Notify {
++
++inline constexpr auto kMuteInFullscreen = "noads-mute-fullscreen";
++inline constexpr auto kMuteSoundOnly = "noads-mute-sound-only";
++
++// Registered from NoAds::Ai::RegisterOptions(): that is the single entry point
++// which already existed and is reached from every code path that can touch the
++// notification manager. Never call base::options::Lookup with an unregistered
++// id - it asserts (Ensures) instead of falling back to a default.
++void RegisterOptions();
++
++[[nodiscard]] bool MuteInFullscreen();
++[[nodiscard]] bool MuteSoundOnly();
++
++} // namespace Notify
++} // namespace NoAds
+--- a/Telegram/SourceFiles/platform/win/notifications_manager_win.cpp
++++ b/Telegram/SourceFiles/platform/win/notifications_manager_win.cpp
+@@ -18,6 +18,7 @@
+ #include "platform/win/windows_app_user_model_id.h"
+ #include "platform/win/windows_toast_activator.h"
+ #include "platform/win/windows_dlls.h"
++#include "noads/noads_notify_options.h"
+ #include "platform/win/specific_win.h"
+ #include "data/data_forum_topic.h"
+ #include "data/data_saved_sublist.h"
+@@ -421,11 +422,25 @@
+ 	QueryUserNotificationState();
+ }
+ 
++// tdesktop-noads: QUNS_BUSY means "a full-screen application is running" -
++// borderless fullscreen windows, F11 / video fullscreen in a browser and
++// windowed-borderless games all report it, while a merely maximized window
++// reports QUNS_ACCEPTS_NOTIFICATIONS. Upstream only treats
++// QUNS_RUNNING_D3D_FULL_SCREEN as fullscreen, so toasts still popped up in
++// those cases; and its sound check tested no fullscreen state at all, so sound
++// always played while watching video or gaming in fullscreen.
++[[nodiscard]] bool NoadsFullscreenActive() {
++	return ::NoAds::Notify::MuteInFullscreen()
++		&& ((UserNotificationState == QUNS_BUSY)
++			|| (UserNotificationState == QUNS_RUNNING_D3D_FULL_SCREEN));
++}
++
+ bool SkipSoundForCustom() {
+ 	QuerySystemNotificationSettings();
+ 
+ 	return (UserNotificationState == QUNS_NOT_PRESENT)
+ 		|| (UserNotificationState == QUNS_PRESENTATION_MODE)
++		|| NoadsFullscreenActive()
+ 		|| (FocusAssistBlocks && Core::App().settings().skipToastsInFocus())
+ 		|| Core::App().screenIsLocked();
+ }
+@@ -445,8 +460,16 @@
+ bool SkipToastForCustom() {
+ 	QuerySystemNotificationSettings();
+ 
++	// Upstream skipped toasts only for QUNS_RUNNING_D3D_FULL_SCREEN (exclusive
++	// Direct3D fullscreen), leaving borderless fullscreen (QUNS_BUSY) popping
++	// up. Add it here too, and honour the "mute sound only" choice by keeping
++	// the toast.
++	const auto noadsToast = NoadsFullscreenActive()
++		&& !::NoAds::Notify::MuteSoundOnly();
++
+ 	return (UserNotificationState == QUNS_PRESENTATION_MODE)
+ 		|| (UserNotificationState == QUNS_RUNNING_D3D_FULL_SCREEN)
++		|| noadsToast
+ 		|| (FocusAssistBlocks && Core::App().settings().skipToastsInFocus());
+ }
+ 
+--- a/Telegram/SourceFiles/settings/settings_noads.cpp
++++ b/Telegram/SourceFiles/settings/settings_noads.cpp
+@@ -8,6 +8,7 @@
+ #include "core/application.h"
+ #include "lang/lang_keys.h"
+ #include "noads/noads_ai_options.h"
++#include "noads/noads_notify_options.h"
+ #include "settings/settings_common.h"
+ #include "styles/style_layers.h"
+ #include "styles/style_settings.h"
+@@ -129,6 +130,40 @@
+ 	Ui::AddDivider(content);
+ 	Ui::AddSkip(content);
+ 
++	Ui::AddSubsectionTitle(content, rpl::single(u"全屏通知"_q));
++
++	const auto notifyToggle = AddToggle(
++		window,
++		content,
++		::NoAds::Notify::kMuteInFullscreen);
++
++	const auto notifyWrap = content->add(
++		object_ptr<Ui::SlideWrap<Ui::VerticalLayout>>(
++			content,
++			object_ptr<Ui::VerticalLayout>(content)));
++	const auto notifyInner = notifyWrap->entity();
++
++	AddToggle(
++		window,
++		notifyInner,
++		::NoAds::Notify::kMuteSoundOnly);
++
++	notifyWrap->toggle(
++		::NoAds::Notify::MuteInFullscreen(),
++		anim::type::instant);
++	notifyToggle->toggledChanges(
++	) | rpl::on_next([=](bool toggled) {
++		notifyWrap->toggle(toggled, anim::type::normal);
++	}, notifyWrap->lifetime());
++
++	Ui::AddSkip(content, st::settingsCheckboxesSkip);
++	Ui::AddDividerText(
++		content,
++		rpl::single(u"全屏指无边框满屏：网页全屏（F11 / 视频全屏）、游戏窗口化全屏与独占全屏。普通最大化窗口不算全屏，通知行为不变。"_q));
++
++	Ui::AddSkip(content);
++	Ui::AddDivider(content);
++	Ui::AddSkip(content);
+ 	Ui::AddSubsectionTitle(content, rpl::single(u"AI 翻译（OpenAI 兼容）"_q));
+ 
+ 	const auto aiToggle = AddToggle(window, content, "noads-ai-translate");
+--- a/Telegram/SourceFiles/noads/noads_ai_options.cpp
++++ b/Telegram/SourceFiles/noads/noads_ai_options.cpp
+@@ -2,6 +2,7 @@
+ This file is part of tdesktop-noads patches for Telegram Desktop.
+ */
+ #include "noads/noads_ai_options.h"
++#include "noads/noads_notify_options.h"
+ 
+ namespace NoAds {
+ namespace Ai {
+@@ -74,6 +75,10 @@
+ 
+ void RegisterOptions() {
+ 	// ODR-use options so they are constructed.
++	// This is the single registration entry point that already existed and is
++	// reached from every path that can touch the notification manager, so the
++	// notify options are registered here as well.
++	::NoAds::Notify::RegisterOptions();
+ 	(void)OptionEnableTranslate.value();
+ 	(void)OptionBaseUrl.value();
+ 	(void)OptionApiKey.value();
