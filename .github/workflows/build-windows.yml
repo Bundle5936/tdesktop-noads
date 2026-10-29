@@ -340,8 +340,10 @@ jobs:
           mkdir -p "$LibrariesPath/local/include"
 
       - name: Build Release libraries
+        id: buildlibs
         timeout-minutes: 285
-        # silent only; Release 需要完整库。Qt 会装到 Libraries/win64/Qt-5.15.x
+        # silent only; Release 需要完整库。Qt 装到 Libraries/win64/Qt-<ver>，
+        # 版本随上游走（v7.3.3 编译期产出 Qt-6.11.2；旧 pin 是 Qt-5.15.x）
         run: '%TBUILD%\%REPO_NAME%\Telegram\build\prepare\win.bat silent'
 
       - name: Verify Qt for x64
@@ -350,20 +352,31 @@ jobs:
           set -euo pipefail
           echo "LibrariesPath=$LibrariesPath"
           ls -la "$LibrariesPath" | head -n 50
-          QT_DIR=$(ls -d "$LibrariesPath"/Qt-5.* 2>/dev/null | tail -n 1 || true)
+
+          # 上游 Qt 主版本会变，这里不能写死某个大版本：
+          # 先取版本号最高的 Qt-* 目录，再校验它确实可用于 CMake。
+          QT_DIR=$(ls -d "$LibrariesPath"/Qt-[0-9]* 2>/dev/null | sort -V | tail -n 1 || true)
           if [[ -z "${QT_DIR:-}" ]]; then
-            echo "Qt-5.* not found under $LibrariesPath" >&2
+            echo "::error::no Qt-* directory under $LibrariesPath" >&2
             ls -la "$LibrariesPath" || true
             exit 1
           fi
-          test -f "$QT_DIR/lib/cmake/Qt5/Qt5Config.cmake" || test -f "$QT_DIR/lib/cmake/Qt5/Qt5Config.cmake" || true
-          if [[ ! -f "$QT_DIR/bin/qmake.exe" && ! -f "$QT_DIR/lib/cmake/Qt5/Qt5Config.cmake" ]]; then
-            echo "Qt installation incomplete: $QT_DIR" >&2
+          echo "candidate QT_DIR=$QT_DIR"
+
+          # Qt5/Qt6 的 cmake 配置文件位置不同，两种都认。
+          QT_CMAKE=$(find "$QT_DIR/lib/cmake" -maxdepth 2 \
+            \( -name 'Qt5Config.cmake' -o -name 'Qt6Config.cmake' \) \
+            2>/dev/null | head -n 1 || true)
+
+          if [[ ! -f "$QT_DIR/bin/qmake.exe" && -z "${QT_CMAKE:-}" ]]; then
+            echo "::error::Qt installation incomplete: $QT_DIR" >&2
             find "$QT_DIR" -maxdepth 3 -type f | head -n 80 >&2 || true
             exit 1
           fi
+
           echo "QT_DIR=$QT_DIR" >> "$GITHUB_ENV"
-          echo "Found Qt at $QT_DIR"
+          echo "QT_DIR=$QT_DIR" >> "$GITHUB_OUTPUT"
+          echo "Found Qt at $QT_DIR (cmake config: ${QT_CMAKE:-none})"
 
       - name: Verify compiled libraries
         shell: bash
@@ -392,15 +405,19 @@ jobs:
             -type f \
           ')' -delete || true
 
+      # 依赖库建完后就算后面的校验/编译再出错，也不应该丢掉这两种缓存：
+      # 上次就是因为 Verify Qt 的旧断言失败，白白重编了 2.5 小时依赖。
+      # 但只要 Build Release libraries 本身失败，就仍然不写缓存，避免把
+      # 半成品库污染给后续每次构建。
       - name: Save ThirdParty cache
-        if: success()
+        if: always() && steps.buildlibs.outcome == 'success'
         uses: actions/cache/save@v6
         with:
           path: ${{ env.TBUILD }}\ThirdParty
           key: ${{ runner.os }}-${{ runner.arch }}-third-party-${{ env.CACHE_KEY }}-${{ github.run_id }}
 
       - name: Save libraries cache
-        if: success()
+        if: always() && steps.buildlibs.outcome == 'success'
         uses: actions/cache/save@v6
         with:
           path: |
@@ -412,7 +429,7 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-x64-libs-rel-${{ env.CACHE_EPOCH }}-${{ env.CACHE_KEY }}-${{ github.run_id }}
 
       - name: Save Qt cache
-        if: success()
+        if: always() && steps.buildlibs.outcome == 'success'
         uses: actions/cache/save@v6
         with:
           path: |
