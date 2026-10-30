@@ -335,7 +335,17 @@ jobs:
             rm -rf "$LibrariesPath/local"
           fi
 
-          # 3. 确保基础目录存在
+          # 3. 检查 tdesktop_rust 生成的 wallet_engine.cpp
+          # 该文件是 UniFFI 生成的 C++ 脚手架，在 tdesktop_rust/out/src/wallet_engine/ 下，
+          # Telegram 编译时作为源码编译。如果之前缓存中该文件被意外清理，清除该库强制重新生成（只需约 2 分钟）
+          if [ -d "$LibrariesPath/cache_keys" ]; then
+            if [ -f "$LibrariesPath/cache_keys/tdesktop_rust" ] && [ ! -f "$LibrariesPath/tdesktop_rust/out/src/wallet_engine/wallet_engine.cpp" ]; then
+              echo "Healing missing wallet_engine.cpp in tdesktop_rust cache..."
+              rm -rf "$LibrariesPath/tdesktop_rust" "$LibrariesPath/cache_keys/tdesktop_rust"
+            fi
+          fi
+
+          # 4. 确保基础目录存在
           mkdir -p "$LibrariesPath/local/lib/pkgconfig"
           mkdir -p "$LibrariesPath/local/include"
 
@@ -386,6 +396,8 @@ jobs:
           test -f "$LibrariesPath/local/lib/pkgconfig/dav1d.pc" || { echo "ERROR: dav1d.pc is missing!" >&2; exit 1; }
           test -f "$LibrariesPath/local/lib/dav1d.lib" || { echo "ERROR: dav1d.lib is missing!" >&2; exit 1; }
           test -f "$LibrariesPath/local/lib/pkgconfig/ffnvcodec.pc" || { echo "ERROR: ffnvcodec.pc is missing!" >&2; exit 1; }
+          test -f "$LibrariesPath/tdesktop_rust/out/src/wallet_engine/wallet_engine.cpp" || { echo "ERROR: wallet_engine.cpp is missing!" >&2; exit 1; }
+          test -f "$LibrariesPath/tdesktop_rust/out/lib/tdesktop_rust.lib" || { echo "ERROR: tdesktop_rust.lib is missing!" >&2; exit 1; }
           echo "All essential release libraries verified."
 
       - name: Free library build leftovers
@@ -394,6 +406,7 @@ jobs:
         run: |
           [ -d "$LibrariesPath" ] || exit 0
           # 只删除不需要的文件，保留所有库文件、头文件、pc 描述符及源码环境；不删除空目录避免破坏结构
+          # 注意：tdesktop_rust/out 包含编译 Telegram 所需的 .lib、.h 以及 UniFFI 生成的 .cpp 源码，必须整目录保留
           find "$LibrariesPath" '(' \
             ! '(' \
               -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.h' -o -name '*.hpp' \
@@ -401,9 +414,16 @@ jobs:
               -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' \
               -o -path '*/patches/*' -o -path '*/qt6windows7/*' -o -path '*/gas-preprocessor/*' \
               -o -path '*/nv-codec-headers/*' -o -path '*/local/*' \
+              -o -path '*/tdesktop_rust/out/*' \
             ')' \
             -type f \
           ')' -delete || true
+
+          # 确保清理后关键文件依然完好
+          test -f "$LibrariesPath/tdesktop_rust/out/src/wallet_engine/wallet_engine.cpp" || {
+            echo "ERROR: cleanup accidentally deleted wallet_engine.cpp!" >&2
+            exit 1
+          }
 
       # 依赖库建完后就算后面的校验/编译再出错，也不应该丢掉这两种缓存：
       # 上次就是因为 Verify Qt 的旧断言失败，白白重编了 2.5 小时依赖。
