@@ -335,7 +335,28 @@ jobs:
             rm -rf "$LibrariesPath/local"
           fi
 
-          # 3. 检查 tdesktop_rust 生成的 wallet_engine.cpp
+          # 3. 检查 qt6_windows7 补丁目录
+          # qt_6.11.2 的 dependencies 包含 qt6_windows7/*.patch。如果目录存在但 patch 缺失，会导致
+          # prepare.py 在计算 stage hash 时直接报 "Nothing found: qt6_windows7/*.patch"
+          if [ -d "$LibrariesPath/cache_keys" ] && [ -f "$LibrariesPath/cache_keys/qt6_windows7" ]; then
+            if ! compgen -G "$LibrariesPath/qt6_windows7/*.patch" > /dev/null; then
+              echo "Healing missing patches in qt6_windows7 cache..."
+              rm -rf "$LibrariesPath/qt6_windows7" "$LibrariesPath/cache_keys/qt6_windows7"
+            fi
+          fi
+
+          # 4. 检查 tlottie 和 wallet-engine 源码
+          # tdesktop_rust 编译时需要作为 Rust 源码依赖引用这两个仓库
+          for pkg in tlottie wallet-engine; do
+            if [ -d "$LibrariesPath/cache_keys" ] && [ -f "$LibrariesPath/cache_keys/$pkg" ]; then
+              if [ ! -f "$LibrariesPath/$pkg/Cargo.toml" ]; then
+                echo "Healing missing Cargo.toml in $pkg cache..."
+                rm -rf "$LibrariesPath/$pkg" "$LibrariesPath/cache_keys/$pkg"
+              fi
+            fi
+          done
+
+          # 5. 检查 tdesktop_rust 生成的 wallet_engine.cpp
           # 该文件是 UniFFI 生成的 C++ 脚手架，在 tdesktop_rust/out/src/wallet_engine/ 下，
           # Telegram 编译时作为源码编译。如果之前缓存中该文件被意外清理，清除该库强制重新生成（只需约 2 分钟）
           if [ -d "$LibrariesPath/cache_keys" ]; then
@@ -345,7 +366,7 @@ jobs:
             fi
           fi
 
-          # 4. 确保基础目录存在
+          # 6. 确保基础目录存在
           mkdir -p "$LibrariesPath/local/lib/pkgconfig"
           mkdir -p "$LibrariesPath/local/include"
 
@@ -406,14 +427,19 @@ jobs:
         run: |
           [ -d "$LibrariesPath" ] || exit 0
           # 只删除不需要的文件，保留所有库文件、头文件、pc 描述符及源码环境；不删除空目录避免破坏结构
-          # 注意：tdesktop_rust/out 包含编译 Telegram 所需的 .lib、.h 以及 UniFFI 生成的 .cpp 源码，必须整目录保留
+          # 注意：
+          # 1. qt6_windows7 目录包含 .patch 文件，是 qt_6.11.2 的编译依赖，路径必须带下划线匹配
+          # 2. tlottie 与 wallet-engine 是 tdesktop_rust 的源码依赖，需保留 Cargo.toml 及 .rs
+          # 3. tdesktop_rust/out 包含编译 Telegram 所需的 .lib、.h 以及 UniFFI 生成的 .cpp 源码，必须整目录保留
           find "$LibrariesPath" '(' \
             ! '(' \
               -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.h' -o -name '*.hpp' \
               -o -name '*.inc' -o -name '*.cmake' -o -name 'Makefile' -o -name '*.pc' -o -name '*.pc.in' \
+              -o -name '*.patch' -o -name 'Cargo.toml' -o -name 'Cargo.lock' -o -name '*.rs' \
               -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' \
-              -o -path '*/patches/*' -o -path '*/qt6windows7/*' -o -path '*/gas-preprocessor/*' \
+              -o -path '*/patches/*' -o -path '*/qt6_windows7/*' -o -path '*/gas-preprocessor/*' \
               -o -path '*/nv-codec-headers/*' -o -path '*/local/*' \
+              -o -path '*/tlottie/*' -o -path '*/wallet-engine/*' \
               -o -path '*/tdesktop_rust/out/*' \
             ')' \
             -type f \
