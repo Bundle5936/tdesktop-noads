@@ -124,6 +124,13 @@ jobs:
           }
           Get-PSDrive C,D -ErrorAction SilentlyContinue | Format-Table Name,Free
 
+      - name: Configure Pagefile
+        uses: al-cheb/configure-pagefile-action@v1.4
+        with:
+          minimum-size: 16GB
+          maximum-size: 32GB
+          disk-root: "D:"
+
       - name: Prepare directories
         run: |
           if exist D:\ (
@@ -560,7 +567,9 @@ jobs:
             || exit /b 1
           > "%CFG_MARKER%" echo %CFG_FLAGS%
           :build
-          cmake --build ..\out --config Release --target Telegram --parallel 2 || exit /b 1
+          rem runner 只有 2 核 7G RAM；_CL_ 已指定 /MP2 进行单工程内 2 线程编译。
+          rem 外部保持 --parallel 1，避免多工程并发导致内存暴涨饿死 runner 掉线。
+          cmake --build ..\out --config Release --target Telegram --parallel 1 || exit /b 1
 
       - name: Package portable zip
         id: pack
