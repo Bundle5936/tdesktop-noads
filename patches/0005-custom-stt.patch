@@ -396,15 +396,15 @@
  		MTP_int(item->id)
 --- a/Telegram/SourceFiles/history/view/history_view_transcribe_button.cpp
 +++ b/Telegram/SourceFiles/history/view/history_view_transcribe_button.cpp
-@@ -23,6 +23,7 @@
- #include "ui/painter.h"
- #include "ui/rect.h"
+@@ -8,6 +8,7 @@
+ #include "history/view/history_view_transcribe_button.h"
+ 
  #include "api/api_transcribes.h"
 +#include "api/api_custom_transcribe.h"
  #include "apiwrap.h"
- #include "styles/style_chat.h"
- #include "window/window_session_controller.h"
-@@ -334,6 +335,9 @@
+ #include "base/unixtime.h"
+ #include "boxes/premium_preview_box.h"
+@@ -335,6 +336,9 @@
  	if (session->premium()) {
  		return false;
  	}
@@ -414,7 +414,7 @@
  	const auto transcribes = &session->api().transcribes();
  	if (_summarize) {
  		return transcribes->summary(_item).premiumRequired;
-@@ -378,7 +382,8 @@
+@@ -379,7 +383,8 @@
  		if (!item) {
  			return;
  		}
@@ -426,7 +426,7 @@
  				? transcribes.toggleSummary(item)
 --- a/Telegram/CMakeLists.txt
 +++ b/Telegram/CMakeLists.txt
-@@ -1863,6 +1863,8 @@
+@@ -2080,6 +2080,8 @@
      noads/noads_ai_options.h
      lang/translate_llm_provider.cpp
      lang/translate_llm_provider.h

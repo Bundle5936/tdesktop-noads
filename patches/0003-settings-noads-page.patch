@@ -234,7 +234,7 @@
 +} // namespace Settings
 --- a/Telegram/CMakeLists.txt
 +++ b/Telegram/CMakeLists.txt
-@@ -1857,6 +1857,8 @@
+@@ -2074,6 +2074,8 @@
      settings/settings_credits_graphics.h
      settings/settings_experimental.cpp
      settings/settings_experimental.h
@@ -245,15 +245,15 @@
      settings/sections/settings_global_ttl.cpp
 --- a/Telegram/SourceFiles/settings/sections/settings_main.cpp
 +++ b/Telegram/SourceFiles/settings/sections/settings_main.cpp
-@@ -56,6 +56,7 @@
- #include "settings/sections/settings_information.h"
- #include "settings/sections/settings_notifications.h"
+@@ -60,6 +60,7 @@
+ #include "settings/settings_common_session.h"
+ #include "settings/settings_faq_suggestions.h"
  #include "settings/settings_power_saving.h"
 +#include "settings/settings_noads.h"
- #include "settings/sections/settings_premium.h"
- #include "settings/sections/settings_privacy_security.h"
  #include "settings/settings_scale_preview.h"
-@@ -435,6 +436,23 @@
+ #include "storage/localstorage.h"
+ #include "ui/boxes/confirm_box.h"
+@@ -438,6 +439,23 @@
  		.icon = { &st::menuIconManage },
  		.keywords = { u"performance"_q, u"proxy"_q, u"experimental"_q },
  	});
